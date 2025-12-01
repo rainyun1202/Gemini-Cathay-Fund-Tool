@@ -101,7 +101,10 @@ class MarketScraper:
     def fetch_history(self, name: str, ticker: str) -> Optional[pd.DataFrame]:
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="2y")
+            
+            # 【修正點】使用 "max" 抓取完整歷史數據，以確保歷史高低點正確
+            hist = stock.history(period="max")
+            
             if hist.empty: return None
             
             hist = hist.reset_index()
