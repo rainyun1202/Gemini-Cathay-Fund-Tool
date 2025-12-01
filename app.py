@@ -251,7 +251,7 @@ def main():
         # 區塊 1: 市場指標 (使用折疊選單)
         with st.expander("🌍 全球市場指標", expanded=True):
             selected_markets = st.multiselect(
-                "選擇要關注的指標",
+                "選擇關注市場指標",
                 options=list(Config.MARKET_TICKERS.keys()),
                 default=list(Config.MARKET_TICKERS.keys())
             )
