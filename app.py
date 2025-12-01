@@ -4,7 +4,7 @@ import pandas as pd
 import urllib3
 import logging
 import io
-import yfinance as yf  # 新增：Yahoo Finance 套件
+import yfinance as yf
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any
@@ -34,13 +34,12 @@ class Config:
         "00560011", "00400072"
     ]
 
-    # --- Yahoo Finance 市場指數設定 (代號對照表) ---
-    # 格式: "顯示名稱": "Yahoo代號"
+    # --- Yahoo Finance 市場指數設定 ---
     MARKET_TICKERS = {
         "比特幣 (BTC-USD)": "BTC-USD",
         "VIX 恐慌指數": "^VIX",
         "美國 10 年期公債殖利率": "^TNX",
-        "美元指數 (DXY)": "DX-Y.NYB", # 或 ^DXY
+        "美元指數 (DXY)": "DX-Y.NYB",
         "布蘭特原油": "BZ=F",
         "黃金期貨": "GC=F",
         "羅素 2000": "^RUT",
@@ -53,14 +52,13 @@ class Config:
 
 
 class FundScraper:
-    """負責抓取國泰基金 (維持原本邏輯)"""
+    """負責抓取國泰基金"""
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": Config.USER_AGENT})
         self.session.verify = False 
 
     def fetch_nav(self, fund_id: str) -> Optional[pd.DataFrame]:
-        # ... (維持原本的抓取邏輯不變) ...
         target_url = Config.BASE_URL.format(fund_id)
         payload = {"req": {"Keys": [fund_id], "From": Config.DEFAULT_DATE_FROM}}
         headers = {"Referer": target_url}
@@ -99,35 +97,23 @@ class FundScraper:
 
 
 class MarketScraper:
-    """[新增] 負責抓取 Yahoo Finance 市場數據"""
-    
+    """負責抓取 Yahoo Finance 市場數據"""
     def fetch_history(self, name: str, ticker: str) -> Optional[pd.DataFrame]:
         try:
-            # 抓取 2 年資料以確保能計算近一年高低點
             stock = yf.Ticker(ticker)
             hist = stock.history(period="2y")
+            if hist.empty: return None
             
-            if hist.empty:
-                return None
-            
-            # === 關鍵步驟：資料清洗與格式化 ===
-            # 我們要讓 Yahoo 的資料長得跟國泰基金的資料一模一樣
-            # 1. 重設索引，將 Date 變成欄位
             hist = hist.reset_index()
-            
-            # 2. 挑選需要的欄位 (Date, Close) 並改名
-            # 注意：Yahoo 的 Date 通常帶有時區，需要移除時區資訊以便對齊
             hist['Date'] = hist['Date'].dt.date
             
-            # 建立目標格式 DataFrame
             df = pd.DataFrame()
             df['日期'] = hist['Date']
-            df['NAV'] = hist['Close']  # 將收盤價視為淨值
-            df['基金名稱'] = name       # 使用我們自定義的中文名稱
-            df['URL'] = f"https://finance.yahoo.com/quote/{ticker}" # 偽造一個 Yahoo 連結
+            df['NAV'] = hist['Close']
+            df['基金名稱'] = name
+            df['URL'] = f"https://finance.yahoo.com/quote/{ticker}"
             
             return df[['日期', 'NAV', '基金名稱', 'URL']]
-            
         except Exception as e:
             logger.error(f"市場指數 {name} 失敗: {e}")
             return None
@@ -136,23 +122,16 @@ class MarketScraper:
         results = {}
         total = len(market_dict)
         completed = 0
-        
-        # 雖然 yfinance 支援批量下載，但為了配合我們的資料結構與錯誤處理，
-        # 我們還是單支單支處理 (速度很快)
         for name, ticker in market_dict.items():
             df = self.fetch_history(name, ticker)
-            if df is not None:
-                results[name] = df # 這裡用名稱當 Key
-            
+            if df is not None: results[name] = df
             completed += 1
-            if progress_bar:
-                progress_bar.progress(completed / total, text=f"正在抓取市場指數... ({name})")
-        
+            if progress_bar: progress_bar.progress(completed / total, text=f"正在抓取市場指數... ({name})")
         return results
 
 
 class FundAnalyzer:
-    """負責計算邏輯 (完全不需要修改，因為輸入格式統一了)"""
+    """負責計算邏輯"""
     @staticmethod
     def analyze_single(df: pd.DataFrame) -> Dict[str, Any]:
         df = df.sort_values('日期')
@@ -177,18 +156,18 @@ class FundAnalyzer:
             min_1y_date = df_1y.loc[min_1y_idx, '日期']
 
         return {
-            "名稱": fund_name, # 微調欄位名稱以通用化
-            "連結": url,
+            "基金名稱": fund_name,
+            "基金連結": url,
             "最新價格": latest['NAV'],
-            "最新日期": latest['日期'],
-            "歷史最高": df.loc[hist_max_idx, 'NAV'],
-            "歷史最高日": df.loc[hist_max_idx, '日期'],
-            "歷史最低": df.loc[hist_min_idx, 'NAV'],
-            "歷史最低日": df.loc[hist_min_idx, '日期'],
-            "近一年最高": max_1y,
-            "近一年最高日": max_1y_date,
-            "近一年最低": min_1y,
-            "近一年最低日": min_1y_date
+            "最新價格日期": latest['日期'],
+            "歷史最高價格": df.loc[hist_max_idx, 'NAV'],
+            "歷史最高價格日期": df.loc[hist_max_idx, '日期'],
+            "歷史最低價格": df.loc[hist_min_idx, 'NAV'],
+            "歷史最低價格日期": df.loc[hist_min_idx, '日期'],
+            "近一年最高價格": max_1y,
+            "近一年最高價格日期": max_1y_date,
+            "近一年最低價格": min_1y,
+            "近一年最低價格日期": min_1y_date
         }
 
     @staticmethod
@@ -205,13 +184,17 @@ class ExcelReport:
     def create_excel_bytes(summary_df: pd.DataFrame) -> bytes:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            # 移除連結欄位用於顯示
-            display_df = summary_df.drop(columns=['連結'])
+            # 移除連結欄位用於顯示 (注意：這裡要對應 FundAnalyzer 的 Key)
+            display_df = summary_df.drop(columns=['基金連結'])
             display_df.to_excel(writer, index=False, header=False, sheet_name='Summary', startrow=1)
+
             workbook = writer.book
             worksheet = writer.sheets['Summary']
+            
+            # 使用之前定義的樣式邏輯
             ExcelReport._apply_styles(workbook, worksheet, display_df, summary_df)
             ExcelReport._set_columns_width(display_df, worksheet)
+            
             worksheet.freeze_panes(1, 0)
         return output.getvalue()
 
@@ -220,18 +203,19 @@ class ExcelReport:
         base_font = 'Microsoft JhengHei'
         header_fmt = workbook.add_format({'bold': True, 'font_name': base_font, 'bg_color': '#DCE6F1', 'align': 'center', 'valign': 'vcenter', 'border': 1})
         text_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1})
-        num_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1, 'num_format': '#,##0.00'}) # 加了小數點格式
+        # 這裡保留了新版的數字格式優化 (加上千分位與小數點)，若您不喜歡可移除 'num_format'
+        num_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1, 'num_format': '#,##0.00'}) 
         link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1, 'font_name': base_font, 'valign': 'top', 'border': 1})
         date_fmt = workbook.add_format({'num_format': 'yyyy-mm-dd', 'font_name': base_font, 'valign': 'top', 'border': 1})
 
         for col, val in enumerate(display_df.columns):
             worksheet.write(0, col, val, header_fmt)
 
-        date_cols = [i for i, c in enumerate(display_df.columns) if '日' in str(c) or 'Date' in str(c)]
+        date_cols = [i for i, c in enumerate(display_df.columns) if '日期' in str(c) or 'Date' in str(c)]
         
         for i in range(len(display_df)):
             name = display_df.iat[i, 0]
-            url = original_df.iloc[i]['連結']
+            url = original_df.iloc[i]['基金連結']
             worksheet.write_url(i+1, 0, url, link_fmt, string=name)
 
             for j in range(1, len(display_df.columns)):
@@ -246,39 +230,47 @@ class ExcelReport:
 
     @staticmethod
     def _set_columns_width(df, worksheet):
+        """動態欄寬計算邏輯"""
         for i, col in enumerate(df.columns):
-            # 簡單估算欄寬
-            worksheet.set_column(i, i, 15)
+            max_len = max(
+                df[col].astype(str).map(lambda x: len(x.encode('utf-8'))).max(),
+                len(str(col).encode('utf-8'))
+            )
+            width = min(max(max_len * 0.9, 10), 50)
+            worksheet.set_column(i, i, width)
 
 
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
     st.markdown("整合 **國泰基金** 與 **全球關鍵市場指標** 的自動化分析工具。")
 
-    col1, col2 = st.columns(2)
-    
-    # 1. 基金設定
-    with col1:
-        st.subheader("🏦 國泰基金清單")
-        default_ids = ",\n".join(Config.DEFAULT_FUND_IDS_LIST)
-        fund_input = st.text_area("基金代號", value=default_ids, height=200)
-        fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
-
-    # 2. 市場指數設定 (使用多選選單)
-    with col2:
-        st.subheader("🌍 全球市場指標")
-        selected_markets = st.multiselect(
-            "選擇要關注的指標",
-            options=list(Config.MARKET_TICKERS.keys()),
-            default=list(Config.MARKET_TICKERS.keys())
-        )
-        # 轉回 Dict 格式以便處理
-        target_markets = {name: Config.MARKET_TICKERS[name] for name in selected_markets}
-
-    if st.button("🚀 開始全域分析", type="primary"):
-        # 進度條共用
-        bar = st.progress(0, text="初始化...")
+    # === 側邊欄佈局 (Sidebar Layout) ===
+    with st.sidebar:
+        st.header("⚙️ 設定面板")
         
+        # 區塊 1: 市場指標 (使用折疊選單)
+        with st.expander("🌍 全球市場指標", expanded=True):
+            selected_markets = st.multiselect(
+                "選擇要關注的指標",
+                options=list(Config.MARKET_TICKERS.keys()),
+                default=list(Config.MARKET_TICKERS.keys())
+            )
+            target_markets = {name: Config.MARKET_TICKERS[name] for name in selected_markets}
+
+        # 區塊 2: 基金清單
+        with st.expander("🏦 國泰基金清單", expanded=True):
+            default_ids = ",\n".join(Config.DEFAULT_FUND_IDS_LIST)
+            fund_input = st.text_area(
+                "基金代號 (每行一個)", 
+                value=default_ids, 
+                height=300, # 恢復原本的高度
+                help="請輸入基金代號，多筆請換行或用逗號分隔"
+            )
+            fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
+
+    # 主畫面按鈕
+    if st.button("🚀 開始分析", type="primary"):
+        bar = st.progress(0, text="初始化...")
         all_data = {}
         
         # A. 抓市場資料
@@ -304,13 +296,15 @@ def main():
         
         # D. 顯示與下載
         st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
-        st.dataframe(summary_df)
+        
+        # 顯示前 10 筆預覽
+        st.dataframe(summary_df.head(10))
 
         excel_data = ExcelReport.create_excel_bytes(summary_df)
         file_name = f"Global_Market_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
         
         st.download_button(
-            label="📥 下載完整 Excel 戰情報表",
+            label="📥 下載完整 Excel 報表",
             data=excel_data,
             file_name=file_name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
