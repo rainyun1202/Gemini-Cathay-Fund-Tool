@@ -9,7 +9,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any
-from dateutil.relativedelta import relativedelta  # 新增：處理月份與年份的加減更精確
+from dateutil.relativedelta import relativedelta
 
 # === 設定區 ===
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -110,7 +110,6 @@ class MarketScraper:
     def fetch_history(self, name: str, ticker: str) -> Optional[pd.DataFrame]:
         try:
             stock = yf.Ticker(ticker)
-            # 使用 "max" 抓取完整歷史數據
             hist = stock.history(period="max")
             
             if hist.empty: return None
@@ -185,6 +184,110 @@ class FundAnalyzer:
         return pd.DataFrame(summary_list)
 
 
+class BacktestEngine:
+    """【新增】 回測計算引擎"""
+    
+    @staticmethod
+    def calculate_lump_sum(df: pd.DataFrame, invest_date: datetime, amount: float):
+        """計算單筆投入回報"""
+        df = df.sort_values('日期').reset_index(drop=True)
+        df['日期'] = pd.to_datetime(df['日期'])
+        
+        # 尋找最接近且不早於投資日期的交易日
+        start_row = df[df['日期'] >= invest_date].head(1)
+        
+        if start_row.empty:
+            return None, "選定的日期晚於所有歷史數據，無法回測。"
+            
+        start_price = start_row['NAV'].values[0]
+        real_start_date = start_row['日期'].dt.date.values[0]
+        
+        end_price = df['NAV'].iloc[-1]
+        end_date = df['日期'].iloc[-1].date()
+        
+        # 計算
+        units = amount / start_price
+        final_value = units * end_price
+        roi = ((final_value - amount) / amount) * 100
+        
+        return {
+            "type": "單筆投入",
+            "real_start_date": real_start_date,
+            "end_date": end_date,
+            "start_price": start_price,
+            "end_price": end_price,
+            "invested_capital": amount,
+            "final_value": final_value,
+            "roi": roi
+        }, None
+
+    @staticmethod
+    def calculate_dca(df: pd.DataFrame, monthly_day: int, amount: float):
+        """計算定期定額回報"""
+        df = df.sort_values('日期').reset_index(drop=True)
+        df['日期'] = pd.to_datetime(df['日期'])
+        
+        # 建立扣款紀錄
+        records = []
+        total_units = 0
+        total_invested = 0
+        
+        # 從資料的第一天開始模擬
+        start_date = df['日期'].iloc[0]
+        end_date = df['日期'].iloc[-1]
+        
+        current_check_date = start_date.replace(day=1)
+        
+        while current_check_date <= end_date:
+            # 設定當月扣款日
+            try:
+                target_date = current_check_date.replace(day=monthly_day)
+            except ValueError:
+                # 處理 2月沒有 30號的情況，直接跳過或設為月底 (這裡簡單處理：設為當月最後一天)
+                next_month = current_check_date + relativedelta(months=1)
+                target_date = next_month - timedelta(days=1)
+
+            if target_date >= start_date and target_date <= end_date:
+                # 找當天或之後最近的交易日
+                trade_row = df[df['日期'] >= target_date].head(1)
+                if not trade_row.empty:
+                    price = trade_row['NAV'].values[0]
+                    trade_date = trade_row['日期'].dt.date.values[0]
+                    
+                    # 避免同一個月重複扣款 (如果交易日跨月)
+                    if not records or records[-1]['date'].month != target_date.month:
+                        units = amount / price
+                        total_units += units
+                        total_invested += amount
+                        records.append({
+                            'date': trade_date,
+                            'price': price,
+                            'units': units,
+                            'cumulative_invested': total_invested
+                        })
+            
+            # 下個月
+            current_check_date += relativedelta(months=1)
+            
+        if total_invested == 0:
+            return None, "無有效扣款紀錄"
+
+        final_price = df['NAV'].iloc[-1]
+        final_value = total_units * final_price
+        roi = ((final_value - total_invested) / total_invested) * 100
+        
+        return {
+            "type": "定期定額",
+            "start_date": records[0]['date'],
+            "end_date": end_date.date(),
+            "total_invested": total_invested,
+            "final_value": final_value,
+            "roi": roi,
+            "deduct_count": len(records),
+            "records": pd.DataFrame(records)
+        }, None
+
+
 class ExcelReport:
     """Excel 產生器"""
     @staticmethod
@@ -256,26 +359,18 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         all_data.update(fund_data)
     return all_data
 
-# === 【優化】 雙軸繪圖函式 (視覺歸一化 + 真實數值軸) ===
+# === 雙軸繪圖函式 ===
 def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
-    """
-    繪製雙Y軸價格走勢比較圖
-    特點：
-    1. 保留原始價格數值 (Y軸顯示真實股價/淨值)
-    2. 視覺上起點重合 (將兩個Y軸的 Range 鎖定在相同的相對比例)
-    """
     if not selected_keys:
         st.info("請從上方選單勾選 1~2 項資產進行比較。")
         return
 
-    # 1. 計算篩選的起始日期
     delta = Config.TIME_RANGES.get(time_range_key)
     if not delta:
         delta = relativedelta(years=1)
     
     start_date_limit = pd.to_datetime("today") - delta
 
-    # 2. 準備數據並計算 "全域相對波動範圍"
     plot_data = []
     global_min_ratio = 1.0
     global_max_ratio = 1.0
@@ -288,22 +383,16 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
             df = df[df['日期'] >= start_date_limit]
             
             if not df.empty:
-                # 取得起始價格 (作為基數 1)
                 start_price = df['NAV'].iloc[0]
-                
-                # 計算該資產在這段期間的相對波動 (Ratio)
-                # 目的只是為了找出大家共同的 "最大/最小漲跌幅範圍"
                 min_price = df['NAV'].min()
                 max_price = df['NAV'].max()
                 
                 min_ratio = min_price / start_price
                 max_ratio = max_price / start_price
                 
-                # 更新全域範圍
                 if min_ratio < global_min_ratio: global_min_ratio = min_ratio
                 if max_ratio > global_max_ratio: global_max_ratio = max_ratio
 
-                # 準備繪圖資訊
                 raw_name = df['基金名稱'].iloc[0]
                 asset_name = str(raw_name) if raw_name else key
                 
@@ -317,31 +406,25 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
         st.warning(f"選取的資產在【{time_range_key}】內無足夠數據可供繪圖。")
         return
 
-    # 3. 為了讓線條不要頂天立地，上下各留 5% 緩衝空間
     range_padding = (global_max_ratio - global_min_ratio) * 0.05
-    # 如果波動極小 (例如定存)，給一個預設緩衝
     if range_padding == 0: range_padding = 0.01
     
     final_min_ratio = global_min_ratio - range_padding
     final_max_ratio = global_max_ratio + range_padding
 
-    # 4. 建立 Plotly 雙軸圖表
     fig = go.Figure()
 
-    # --- 第一個資產 (左軸) ---
     d1 = plot_data[0]
     fig.add_trace(go.Scatter(
         x=d1["data"]['日期'], 
         y=d1["data"]['NAV'], 
         name=d1["name"],
         yaxis='y',
-        hovertemplate='%{y:,.2f}' # 顯示千分位真實價格
+        hovertemplate='%{y:,.2f}'
     ))
     
-    # 計算左軸的真實價格範圍
     y1_range = [d1["start_price"] * final_min_ratio, d1["start_price"] * final_max_ratio]
 
-    # --- 第二個資產 (右軸，如果有的話) ---
     y2_range = None
     if len(plot_data) > 1:
         d2 = plot_data[1]
@@ -352,12 +435,8 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
             yaxis='y2',
             hovertemplate='%{y:,.2f}'
         ))
-        # 計算右軸的真實價格範圍
         y2_range = [d2["start_price"] * final_min_ratio, d2["start_price"] * final_max_ratio]
-
-    # 5. 設定 Layout (關鍵：強制鎖定 Y 軸 Range)
     
-    # 共用設定
     fig.update_layout(
         title=f'資產價格走勢比較 ({time_range_key}) - 起點歸一化視角',
         xaxis=dict(title='日期'),
@@ -365,18 +444,16 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
         legend=dict(orientation="h", y=1.1)
     )
 
-    # 左軸設定
     fig.update_layout(
         yaxis=dict(
             title=d1["name"],
             title_font=dict(color='#1f77b4'),
             tickfont=dict(color='#1f77b4'),
-            range=y1_range, # <--- 關鍵：強制設定範圍
-            tickformat=',.2f' # 格式化軸標籤
+            range=y1_range,
+            tickformat=',.2f'
         )
     )
 
-    # 右軸設定
     if len(plot_data) > 1:
         fig.update_layout(
             yaxis2=dict(
@@ -385,7 +462,7 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
                 tickfont=dict(color='#ff7f0e'),
                 overlaying='y',
                 side='right',
-                range=y2_range, # <--- 關鍵：強制設定範圍
+                range=y2_range,
                 tickformat=',.2f'
             )
         )
@@ -397,7 +474,6 @@ def main():
     st.title("📊 全球市場與基金淨值戰情室")
     st.markdown("整合 **國泰基金** 與 **全球關鍵市場指標** 的自動化分析工具。")
 
-    # === 側邊欄佈局 ===
     with st.sidebar:
         st.header("⚙️ 設定面板")
         
@@ -419,19 +495,26 @@ def main():
             )
             fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
 
-    if st.button("🚀 開始分析", type="primary"):
+    if st.button("🚀 開始/更新 分析", type="primary"):
         st.session_state['has_run'] = True
 
     if st.session_state.get('has_run'):
-        # 1. 載入資料 (使用快取)
         all_data = load_data_with_cache(target_markets, fund_ids)
 
         if not all_data:
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
 
-        # 2. 建立分頁
-        tab1, tab2 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較"])
+        # 建立選項對照表
+        options_map = {}
+        for key, df in all_data.items():
+            if not df.empty:
+                fund_name = df['基金名稱'].iloc[0]
+                display_label = f"{fund_name} ({key})" if fund_name != key else key
+                options_map[display_label] = key
+
+        # 建立三個分頁
+        tab1, tab2, tab3 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測"])
 
         # === 分頁 1：報表 ===
         with tab1:
@@ -441,49 +524,74 @@ def main():
 
             excel_data = ExcelReport.create_excel_bytes(summary_df)
             file_name = f"Global_Market_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
-            
-            st.download_button(
-                label="📥 下載完整 Excel 報表",
-                data=excel_data,
-                file_name=file_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            st.download_button("📥 下載完整 Excel 報表", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         # === 分頁 2：雙軸圖表 ===
         with tab2:
             st.subheader("資產價格走勢分析")
-            st.caption("請選擇 **最多 2 項** 資產進行對照。")
-            
-            # --- 步驟 1: 選擇時間區間 ---
-            time_range = st.radio(
-                "選擇時間區間:",
-                options=list(Config.TIME_RANGES.keys()),
-                index=3, # 預設選 "近1年"
-                horizontal=True
-            )
-
-            # --- 步驟 2: 建立名稱對照表 ---
-            options_map = {}
-            for key, df in all_data.items():
-                if not df.empty:
-                    fund_name = df['基金名稱'].iloc[0]
-                    if fund_name != key:
-                        display_label = f"{fund_name} ({key})"
-                    else:
-                        display_label = key
-                    options_map[display_label] = key
-
-            # --- 步驟 3: 選擇資產 ---
-            selected_labels = st.multiselect(
-                "選擇要繪製的資產 (Max 2):",
-                options=list(options_map.keys()),
-                max_selections=2
-            )
-            
+            time_range = st.radio("選擇時間區間:", options=list(Config.TIME_RANGES.keys()), index=3, horizontal=True)
+            selected_labels = st.multiselect("選擇要繪製的資產 (Max 2):", options=list(options_map.keys()), max_selections=2)
             selected_keys = [options_map[label] for label in selected_labels]
-            
-            # --- 步驟 4: 繪圖 ---
             plot_dual_axis_trends(all_data, selected_keys, time_range)
+
+        # === 分頁 3：投資回測 ===
+        with tab3:
+            st.subheader("💰 投資策略回測計算機")
+            
+            # 選擇回測標的
+            target_label = st.selectbox("請選擇回測標的:", list(options_map.keys()))
+            target_key = options_map[target_label]
+            target_df = all_data.get(target_key)
+
+            if target_df is None or target_df.empty:
+                st.error("此標的無數據，無法回測")
+            else:
+                col_lump, col_dca = st.columns(2)
+
+                # --- 單筆投入 ---
+                with col_lump:
+                    st.markdown("### 1️⃣ 單筆投入 (Lump Sum)")
+                    lump_date = st.date_input("買入日期", value=datetime(2020, 1, 1))
+                    lump_amt = st.number_input("投入金額", value=100000, step=10000)
+                    
+                    if st.button("計算單筆報酬"):
+                        res, err = BacktestEngine.calculate_lump_sum(target_df, pd.to_datetime(lump_date), lump_amt)
+                        if err:
+                            st.error(err)
+                        else:
+                            color = "green" if res['roi'] >= 0 else "red"
+                            st.markdown(f"""
+                            #### 📊 回測結果
+                            * **實際買入日**: {res['real_start_date']} (淨值: {res['start_price']:.2f})
+                            * **結算日**: {res['end_date']} (淨值: {res['end_price']:.2f})
+                            * **目前總市值**: **{res['final_value']:,.0f}** 元
+                            * **投資報酬率**: <span style='color:{color};font-size:1.2em'>**{res['roi']:.2f}%**</span>
+                            """, unsafe_allow_html=True)
+
+                # --- 定期定額 ---
+                with col_dca:
+                    st.markdown("### 2️⃣ 定期定額 (DCA)")
+                    dca_day = st.number_input("每月扣款日 (1-31)", value=5, min_value=1, max_value=31)
+                    dca_amt = st.number_input("每期扣款金額", value=5000, step=1000)
+                    
+                    if st.button("計算定期定額"):
+                        res, err = BacktestEngine.calculate_dca(target_df, dca_day, dca_amt)
+                        if err:
+                            st.error(err)
+                        else:
+                            color = "green" if res['roi'] >= 0 else "red"
+                            st.markdown(f"""
+                            #### 📊 回測結果
+                            * **回測期間**: {res['start_date']} ~ {res['end_date']}
+                            * **總扣款次數**: {res['deduct_count']} 次
+                            * **總投入本金**: {res['total_invested']:,} 元
+                            * **目前總市值**: **{res['final_value']:,.0f}** 元
+                            * **投資報酬率**: <span style='color:{color};font-size:1.2em'>**{res['roi']:.2f}%**</span>
+                            """, unsafe_allow_html=True)
+                            
+                            # 顯示詳細扣款紀錄
+                            with st.expander("查看詳細扣款紀錄"):
+                                st.dataframe(res['records'])
 
 if __name__ == "__main__":
     main()
