@@ -5,11 +5,11 @@ import urllib3
 import logging
 import io
 import yfinance as yf
-import plotly.express as px
-import plotly.graph_objects as go  # 新增：用於繪製更複雜的雙軸圖
+import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any
+from dateutil.relativedelta import relativedelta  # 新增：處理月份與年份的加減更精確
 
 # === 設定區 ===
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -50,6 +50,17 @@ class Config:
         "費城半導體": "^SOX",
         "上證指數": "000001.SS",
         "香港國企指數": "^HSCE"
+    }
+
+    # --- 時間區間選項 ---
+    TIME_RANGES = {
+        "近1月": relativedelta(months=1),
+        "近3月": relativedelta(months=3),
+        "近半年": relativedelta(months=6),
+        "近1年": relativedelta(years=1),
+        "近3年": relativedelta(years=3),
+        "近5年": relativedelta(years=5),
+        "近10年": relativedelta(years=10),
     }
 
 
@@ -245,31 +256,43 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         all_data.update(fund_data)
     return all_data
 
-# === 【修正】 雙軸繪圖函式 ===
-def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str]):
-    """繪製雙Y軸價格走勢比較圖 (修復 layout update 錯誤)"""
+# === 【修正】 雙軸繪圖函式 (支援多時間區間) ===
+def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
+    """
+    繪製雙Y軸價格走勢比較圖
+    :param time_range_key: 使用者選擇的時間區間 (例如 "近1年")
+    """
     if not selected_keys:
         st.info("請從上方選單勾選 1~2 項資產進行比較。")
         return
 
-    # 取得要畫的資料 (取最近 3 年)
+    # 計算篩選的起始日期
+    delta = Config.TIME_RANGES.get(time_range_key)
+    if not delta:
+        # 預防萬一，預設為 1 年
+        delta = relativedelta(years=1)
+    
+    start_date_limit = pd.to_datetime("today") - delta
+
+    # 準備繪圖資料
     plot_dfs = []
     for key in selected_keys:
         if key in all_data:
             df = all_data[key].copy()
             df = df.sort_values('日期')
-            start_date_limit = pd.to_datetime("today") - pd.DateOffset(years=3)
             df['日期'] = pd.to_datetime(df['日期'])
+            
+            # 根據時間區間篩選
             df = df[df['日期'] >= start_date_limit]
             
             if not df.empty:
-                # 確保名稱是字串格式，避免 numpy 格式導致 Plotly 報錯
+                # 確保名稱是字串格式
                 raw_name = df['基金名稱'].iloc[0]
                 asset_name = str(raw_name) if raw_name else key
                 plot_dfs.append({"data": df, "name": asset_name})
 
     if not plot_dfs:
-        st.warning("選取的資產在近三年內無足夠數據可供繪圖。")
+        st.warning(f"選取的資產在【{time_range_key}】內無足夠數據可供繪圖。")
         return
 
     # 建立 Plotly 雙軸圖表
@@ -295,17 +318,16 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
             yaxis='y2'
         ))
 
-    # === 修正點：分段設定 Layout，避免 ValueError ===
-    
-    # 1. 設定共用基礎樣式
+    # 設定 Layout (分段設定避免 Error)
+    # 1. 基礎樣式
     fig.update_layout(
-        title='資產價格走勢比較 (近三年)',
+        title=f'資產價格走勢比較 ({time_range_key})',
         xaxis=dict(title='日期'),
         hovermode='x unified',
         legend=dict(orientation="h", y=1.1)
     )
 
-    # 2. 設定左側 Y 軸 (YAxis 1)
+    # 2. 左側 Y 軸
     fig.update_layout(
         yaxis=dict(
             title=plot_dfs[0]["name"],
@@ -314,15 +336,15 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
         )
     )
 
-    # 3. 如果有第二個資產，設定右側 Y 軸 (YAxis 2)
+    # 3. 右側 Y 軸 (如果有)
     if len(plot_dfs) > 1:
         fig.update_layout(
             yaxis2=dict(
                 title=plot_dfs[1]["name"],
                 title_font=dict(color='#ff7f0e'),
                 tickfont=dict(color='#ff7f0e'),
-                overlaying='y',  # 疊加在第一個 Y 軸上
-                side='right'     # 放在右邊
+                overlaying='y',
+                side='right'
             )
         )
 
@@ -367,7 +389,7 @@ def main():
             return
 
         # 2. 建立分頁
-        tab1, tab2 = st.tabs(["📋 報表總覽", "📈 趨勢比較 (雙軸)"])
+        tab1, tab2 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較"])
 
         # === 分頁 1：報表 ===
         with tab1:
@@ -387,35 +409,39 @@ def main():
 
         # === 分頁 2：雙軸圖表 ===
         with tab2:
-            st.subheader("📈 資產價格走勢對照")
-            st.caption("請選擇 **最多 2 項** 資產進行對照。左右 Y 軸將分別顯示各自的真實價格區間。")
+            st.subheader("資產價格走勢分析")
+            st.caption("請選擇 **最多 2 項** 資產進行對照。")
             
-            # 【優化】 建立 "顯示名稱 -> 資料 Key" 的對照表
-            # 這樣選單就不會只顯示冷冰冰的代號，而是顯示 "基金名稱 (代號)"
+            # --- 步驟 1: 選擇時間區間 ---
+            time_range = st.radio(
+                "選擇時間區間:",
+                options=list(Config.TIME_RANGES.keys()),
+                index=3, # 預設選 "近1年"
+                horizontal=True
+            )
+
+            # --- 步驟 2: 建立名稱對照表 ---
             options_map = {}
             for key, df in all_data.items():
                 if not df.empty:
-                    # 如果 key 是基金代號，通常是數字，我們把中文名稱加上去
-                    # 如果 key 本來就是市場名稱 (如 "比特幣")，就維持原樣
                     fund_name = df['基金名稱'].iloc[0]
                     if fund_name != key:
                         display_label = f"{fund_name} ({key})"
                     else:
                         display_label = key
-                    
                     options_map[display_label] = key
 
-            # 讓使用者選擇 (顯示的是優化後的 Label)
+            # --- 步驟 3: 選擇資產 ---
             selected_labels = st.multiselect(
                 "選擇要繪製的資產 (Max 2):",
                 options=list(options_map.keys()),
-                max_selections=2  # 限制最多選 2 個
+                max_selections=2
             )
             
-            # 將 Label 轉回原本的 Key 以便撈取資料
             selected_keys = [options_map[label] for label in selected_labels]
             
-            plot_dual_axis_trends(all_data, selected_keys)
+            # --- 步驟 4: 繪圖 ---
+            plot_dual_axis_trends(all_data, selected_keys, time_range)
 
 if __name__ == "__main__":
     main()
