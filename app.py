@@ -185,7 +185,7 @@ class FundAnalyzer:
 
 
 class BacktestEngine:
-    """【新增】 回測計算引擎"""
+    """回測計算引擎"""
     
     @staticmethod
     def calculate_lump_sum(df: pd.DataFrame, invest_date: datetime, amount: float):
@@ -197,7 +197,8 @@ class BacktestEngine:
         start_row = df[df['日期'] >= invest_date].head(1)
         
         if start_row.empty:
-            return None, "選定的日期晚於所有歷史數據，無法回測。"
+            # 如果選的日期比所有數據都晚 (例如選了未來)，回傳錯誤
+            return None, "選定日期無有效數據 (可能過晚)"
             
         start_price = start_row['NAV'].values[0]
         real_start_date = start_row['日期'].dt.date.values[0]
@@ -222,40 +223,57 @@ class BacktestEngine:
         }, None
 
     @staticmethod
-    def calculate_dca(df: pd.DataFrame, monthly_day: int, amount: float):
-        """計算定期定額回報"""
+    def calculate_dca(df: pd.DataFrame, start_date: datetime, monthly_day: int, amount: float):
+        """計算定期定額回報 (新增 start_date 參數)"""
         df = df.sort_values('日期').reset_index(drop=True)
         df['日期'] = pd.to_datetime(df['日期'])
+        
+        # 確保 start_date 有被轉成 timestamp 比較
+        start_date = pd.to_datetime(start_date)
         
         # 建立扣款紀錄
         records = []
         total_units = 0
         total_invested = 0
         
-        # 從資料的第一天開始模擬
-        start_date = df['日期'].iloc[0]
-        end_date = df['日期'].iloc[-1]
+        data_end_date = df['日期'].iloc[-1]
         
-        current_check_date = start_date.replace(day=1)
+        # 從使用者指定的開始日期開始跑
+        current_check_date = start_date
         
-        while current_check_date <= end_date:
-            # 設定當月扣款日
+        # 如果使用者選的日期的 "日" 超過當月天數 (例如 2/30)，relativedelta 會自動處理，這裡我們做簡單校正
+        # 策略：從 start_date 開始，每個月的 monthly_day 扣款
+        # 先找到 "第一次扣款日"
+        
+        # 如果 start_date 的日子 > monthly_day，則第一次扣款是下個月
+        # 如果 start_date 的日子 <= monthly_day，則第一次扣款是當月 (若該日還沒過)
+        # 為了簡化，我們直接從 start_date 所在的月份開始檢查
+        
+        current_month_first = start_date.replace(day=1)
+        
+        while current_month_first <= data_end_date:
+            # 嘗試建構當月的扣款日
             try:
-                target_date = current_check_date.replace(day=monthly_day)
+                target_date = current_month_first.replace(day=monthly_day)
             except ValueError:
-                # 處理 2月沒有 30號的情況，直接跳過或設為月底 (這裡簡單處理：設為當月最後一天)
-                next_month = current_check_date + relativedelta(months=1)
+                # 處理該月沒有這一天 (例如 2/30)，設為該月最後一天
+                next_month = current_month_first + relativedelta(months=1)
                 target_date = next_month - timedelta(days=1)
-
-            if target_date >= start_date and target_date <= end_date:
+            
+            # 只有當 "目標扣款日" >= "使用者設定的開始日" 且 <= "資料最後一天" 才扣款
+            if target_date >= start_date and target_date <= data_end_date:
                 # 找當天或之後最近的交易日
                 trade_row = df[df['日期'] >= target_date].head(1)
+                
                 if not trade_row.empty:
+                    # 檢查找到的交易日是否跳到下個月去了 (例如月底無交易，跳到下月初)
+                    # 這裡策略是：只要是有效交易日就扣，不管是否跨月，這是模擬 "順延扣款"
+                    
                     price = trade_row['NAV'].values[0]
                     trade_date = trade_row['日期'].dt.date.values[0]
                     
-                    # 避免同一個月重複扣款 (如果交易日跨月)
-                    if not records or records[-1]['date'].month != target_date.month:
+                    # 避免重複紀錄 (例如同一個交易日被多次匹配)
+                    if not records or records[-1]['date'] != trade_date:
                         units = amount / price
                         total_units += units
                         total_invested += amount
@@ -266,11 +284,11 @@ class BacktestEngine:
                             'cumulative_invested': total_invested
                         })
             
-            # 下個月
-            current_check_date += relativedelta(months=1)
+            # 推進到下個月
+            current_month_first += relativedelta(months=1)
             
         if total_invested == 0:
-            return None, "無有效扣款紀錄"
+            return None, "在此期間內無有效扣款紀錄"
 
         final_price = df['NAV'].iloc[-1]
         final_value = total_units * final_price
@@ -279,13 +297,48 @@ class BacktestEngine:
         return {
             "type": "定期定額",
             "start_date": records[0]['date'],
-            "end_date": end_date.date(),
+            "end_date": data_end_date.date(),
             "total_invested": total_invested,
             "final_value": final_value,
             "roi": roi,
             "deduct_count": len(records),
             "records": pd.DataFrame(records)
         }, None
+
+    @staticmethod
+    def generate_quick_summary(df: pd.DataFrame):
+        """產生快速回測總表 (1M, 3M, 6M, 1Y, 3Y, 5Y, 10Y)"""
+        periods = {
+            "近 1 月": relativedelta(months=1),
+            "近 3 月": relativedelta(months=3),
+            "近 6 月": relativedelta(months=6),
+            "近 1 年": relativedelta(years=1),
+            "近 3 年": relativedelta(years=3),
+            "近 5 年": relativedelta(years=5),
+            "近 10 年": relativedelta(years=10),
+        }
+        
+        results = []
+        today = datetime.now()
+        
+        for name, delta in periods.items():
+            start_date = today - delta
+            
+            # 單筆 (預設 10萬)
+            res_lump, err_lump = BacktestEngine.calculate_lump_sum(df, start_date, 100000)
+            roi_lump = res_lump['roi'] if not err_lump else None
+            
+            # DCA (預設每月5號, 5000)
+            res_dca, err_dca = BacktestEngine.calculate_dca(df, start_date, 5, 5000)
+            roi_dca = res_dca['roi'] if not err_dca else None
+            
+            results.append({
+                "週期": name,
+                "單筆報酬率 (%)": f"{roi_lump:.2f}" if roi_lump is not None else "-",
+                "定期定額報酬率 (%)": f"{roi_dca:.2f}" if roi_dca is not None else "-"
+            })
+            
+        return pd.DataFrame(results)
 
 
 class ExcelReport:
@@ -538,60 +591,92 @@ def main():
         with tab3:
             st.subheader("💰 投資策略回測計算機")
             
-            # 選擇回測標的
-            target_label = st.selectbox("請選擇回測標的:", list(options_map.keys()))
-            target_key = options_map[target_label]
+            # 初始化 session_state 用於儲存計算結果，確保不會因為重新點擊按鈕而消失
+            if 'calc_results_lump' not in st.session_state: st.session_state['calc_results_lump'] = None
+            if 'calc_results_dca' not in st.session_state: st.session_state['calc_results_dca'] = None
+            
+            # 當標的改變時，清空之前的計算結果
+            current_target = st.selectbox("請選擇回測標的:", list(options_map.keys()))
+            if 'last_target' not in st.session_state or st.session_state['last_target'] != current_target:
+                st.session_state['last_target'] = current_target
+                st.session_state['calc_results_lump'] = None
+                st.session_state['calc_results_dca'] = None
+                
+            target_key = options_map[current_target]
             target_df = all_data.get(target_key)
 
             if target_df is None or target_df.empty:
                 st.error("此標的無數據，無法回測")
             else:
-                col_lump, col_dca = st.columns(2)
+                # 0. 顯示快速總覽 (Quick Stats)
+                st.markdown("##### ⚡ 歷史報酬率速覽")
+                quick_stats_df = BacktestEngine.generate_quick_summary(target_df)
+                st.dataframe(quick_stats_df, hide_index=True)
+                st.divider()
 
-                # --- 單筆投入 ---
+                col_lump, col_dca = st.columns(2)
+                today = datetime.now()
+                one_year_ago = today - relativedelta(years=1)
+
+                # --- 1. 單筆投入 ---
                 with col_lump:
                     st.markdown("### 1️⃣ 單筆投入 (Lump Sum)")
-                    lump_date = st.date_input("買入日期", value=datetime(2020, 1, 1))
+                    # 設定 max_value 為今天，預設為一年前
+                    lump_date = st.date_input("買入日期", value=one_year_ago, max_value=today)
                     lump_amt = st.number_input("投入金額", value=100000, step=10000)
                     
                     if st.button("計算單筆報酬"):
                         res, err = BacktestEngine.calculate_lump_sum(target_df, pd.to_datetime(lump_date), lump_amt)
-                        if err:
-                            st.error(err)
-                        else:
-                            color = "green" if res['roi'] >= 0 else "red"
-                            st.markdown(f"""
-                            #### 📊 回測結果
-                            * **實際買入日**: {res['real_start_date']} (淨值: {res['start_price']:.2f})
-                            * **結算日**: {res['end_date']} (淨值: {res['end_price']:.2f})
-                            * **目前總市值**: **{res['final_value']:,.0f}** 元
-                            * **投資報酬率**: <span style='color:{color};font-size:1.2em'>**{res['roi']:.2f}%**</span>
-                            """, unsafe_allow_html=True)
+                        if err: st.error(err)
+                        else: st.session_state['calc_results_lump'] = res
 
-                # --- 定期定額 ---
+                    # 顯示結果 (從 session_state 讀取)
+                    if st.session_state['calc_results_lump']:
+                        res = st.session_state['calc_results_lump']
+                        color = "green" if res['roi'] >= 0 else "red"
+                        st.markdown(f"""
+                        <div style='background-color:#f0f2f6; padding:15px; border-radius:10px'>
+                            <h4 style='margin-top:0'>📊 單筆回測結果</h4>
+                            <ul>
+                                <li><b>實際買入日</b>: {res['real_start_date']} (淨值: {res['start_price']:.2f})</li>
+                                <li><b>結算日</b>: {res['end_date']} (淨值: {res['end_price']:.2f})</li>
+                                <li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li>
+                                <li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li>
+                            </ul>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                # --- 2. 定期定額 ---
                 with col_dca:
                     st.markdown("### 2️⃣ 定期定額 (DCA)")
+                    # 新增 DCA 開始日期選擇
+                    dca_start = st.date_input("開始扣款日期", value=one_year_ago, max_value=today)
                     dca_day = st.number_input("每月扣款日 (1-31)", value=5, min_value=1, max_value=31)
                     dca_amt = st.number_input("每期扣款金額", value=5000, step=1000)
                     
                     if st.button("計算定期定額"):
-                        res, err = BacktestEngine.calculate_dca(target_df, dca_day, dca_amt)
-                        if err:
-                            st.error(err)
-                        else:
-                            color = "green" if res['roi'] >= 0 else "red"
-                            st.markdown(f"""
-                            #### 📊 回測結果
-                            * **回測期間**: {res['start_date']} ~ {res['end_date']}
-                            * **總扣款次數**: {res['deduct_count']} 次
-                            * **總投入本金**: {res['total_invested']:,} 元
-                            * **目前總市值**: **{res['final_value']:,.0f}** 元
-                            * **投資報酬率**: <span style='color:{color};font-size:1.2em'>**{res['roi']:.2f}%**</span>
-                            """, unsafe_allow_html=True)
-                            
-                            # 顯示詳細扣款紀錄
-                            with st.expander("查看詳細扣款紀錄"):
-                                st.dataframe(res['records'])
+                        res, err = BacktestEngine.calculate_dca(target_df, pd.to_datetime(dca_start), dca_day, dca_amt)
+                        if err: st.error(err)
+                        else: st.session_state['calc_results_dca'] = res
+                        
+                    # 顯示結果
+                    if st.session_state['calc_results_dca']:
+                        res = st.session_state['calc_results_dca']
+                        color = "green" if res['roi'] >= 0 else "red"
+                        st.markdown(f"""
+                        <div style='background-color:#f0f2f6; padding:15px; border-radius:10px'>
+                            <h4 style='margin-top:0'>📊 定期定額結果</h4>
+                            <ul>
+                                <li><b>回測期間</b>: {res['start_date']} ~ {res['end_date']}</li>
+                                <li><b>總扣款次數</b>: {res['deduct_count']} 次</li>
+                                <li><b>總投入本金</b>: {res['total_invested']:,} 元</li>
+                                <li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li>
+                                <li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li>
+                            </ul>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        with st.expander("查看詳細扣款紀錄"):
+                            st.dataframe(res['records'], hide_index=True)
 
 if __name__ == "__main__":
     main()
