@@ -4,3 +4,4 @@ requests
 xlsxwriter
 urllib3
 yfinance
+plotly

@@ -5,6 +5,7 @@ import urllib3
 import logging
 import io
 import yfinance as yf
+import plotly.express as px  # 新增：互動式繪圖套件
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any
@@ -79,10 +80,19 @@ class FundScraper:
             logger.error(f"基金 {fund_id} 失敗: {e}")
             return None
 
-    # 移除原本的 fetch_all，改為透過外部函式呼叫以支援快取
-    def fetch_single_safe(self, fid):
-        """單純為了 ThreadPool 設計的輔助函式"""
-        return self.fetch_nav(fid)
+    def fetch_all(self, fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
+        # 注意：為了配合 Caching，這裡移除了 progress_bar 的參數傳遞
+        # 因為快取函數在背景執行時無法更新 UI 元件
+        results = {}
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            future_to_id = {executor.submit(self.fetch_nav, fid): fid for fid in fund_ids}
+            for future in as_completed(future_to_id):
+                fid = future_to_id[future]
+                try:
+                    df = future.result()
+                    if df is not None: results[fid] = df
+                except Exception: pass
+        return results
 
 
 class MarketScraper:
@@ -109,34 +119,12 @@ class MarketScraper:
             logger.error(f"市場指數 {name} 失敗: {e}")
             return None
 
-# === 【第一階段優化】快取函式 ===
-# 這些函式獨立於 Class 之外，因為 Streamlit 的快取裝飾器對 Class method 支援度較複雜
-# ttl=3600 代表快取存活 1 小時，避免資料過舊
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_fund_data(fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
-    """[快取] 抓取國泰基金資料"""
-    scraper = FundScraper()
-    results = {}
-    # 為了顯示進度，我們這裡簡單模擬，實際上因為有快取，第二次執行會瞬間完成
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_id = {executor.submit(scraper.fetch_single_safe, fid): fid for fid in fund_ids}
-        for future in as_completed(future_to_id):
-            fid = future_to_id[future]
-            try:
-                df = future.result()
-                if df is not None: results[fid] = df
-            except Exception: pass
-    return results
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_cached_market_data(market_dict: Dict[str, str]) -> Dict[str, pd.DataFrame]:
-    """[快取] 抓取市場資料"""
-    scraper = MarketScraper()
-    results = {}
-    for name, ticker in market_dict.items():
-        df = scraper.fetch_history(name, ticker)
-        if df is not None: results[name] = df
-    return results
+    def fetch_all(self, market_dict: Dict[str, str]) -> Dict[str, pd.DataFrame]:
+        results = {}
+        for name, ticker in market_dict.items():
+            df = self.fetch_history(name, ticker)
+            if df is not None: results[name] = df
+        return results
 
 
 class FundAnalyzer:
@@ -244,40 +232,84 @@ class ExcelReport:
             width = min(max(max_len * 0.9, 10), 50)
             worksheet.set_column(i, i, width)
 
-# === 【第二階段優化】視覺化處理類別 ===
-class Visualizer:
-    @staticmethod
-    def prepare_chart_data(all_data: Dict[str, pd.DataFrame], normalize=False) -> pd.DataFrame:
-        """
-        將多個 DataFrame 合併為適合繪圖的 Wide Format
-        normalize: 是否將起點歸一化為 100% (方便比較漲跌幅)
-        """
-        # 1. 提取所有資料的 '日期' 和 'NAV'
-        series_list = []
-        for name, df in all_data.items():
-            # 確保日期是 datetime 格式
-            temp_df = df[['日期', 'NAV']].copy()
-            temp_df['日期'] = pd.to_datetime(temp_df['日期'])
-            temp_df = temp_df.set_index('日期')
-            temp_df.columns = [name]
-            series_list.append(temp_df)
+# === 【新增】 快取資料載入函式 ===
+@st.cache_data(ttl=3600, show_spinner="正在自網路下載最新數據...")
+def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
+    """
+    這個函式會被 Streamlit 快取。
+    只要輸入參數 (fund_ids, target_markets) 沒變，就會直接回傳上次的結果，不會重新下載。
+    """
+    all_data = {}
+    
+    # 下載市場資料
+    if target_markets:
+        market_scraper = MarketScraper()
+        # 注意：為了 Cache 穩定，這裡不傳入 progress bar
+        market_data = market_scraper.fetch_all(target_markets)
+        all_data.update(market_data)
         
-        if not series_list:
-            return pd.DataFrame()
+    # 下載基金資料
+    if fund_ids:
+        fund_scraper = FundScraper()
+        fund_data = fund_scraper.fetch_all(fund_ids)
+        all_data.update(fund_data)
+        
+    return all_data
 
-        # 2. 合併 (Outer Join 以保留所有日期)
-        chart_df = pd.concat(series_list, axis=1).sort_index()
-        
-        # 3. 填補空值 (Forward Fill: 假日沿用週五價格)
-        chart_df = chart_df.fillna(method='ffill')
-        
-        # 4. 歸一化處理 (可選)
-        if normalize:
-            # 找到每一欄第一個非空值，將其設為基準點 (100)
-            # 這樣可以比較不同價格區間的商品 (如比特幣 90000 vs 基金 10)
-            return chart_df.apply(lambda x: x / x.first_valid_index() * 100 if x.first_valid_index() else x)
-        
-        return chart_df
+# === 【新增】 繪圖邏輯函式 ===
+def plot_normalized_trends(all_data: Dict[str, pd.DataFrame], selected_assets: List[str]):
+    """繪製歸一化 (累積報酬率) 比較圖"""
+    if not selected_assets:
+        st.info("請從上方選單勾選至少一項資產進行比較。")
+        return
+
+    plot_data = []
+    
+    for name in selected_assets:
+        if name in all_data:
+            df = all_data[name].copy()
+            df = df.sort_values('日期')
+            
+            # 過濾掉極端舊的資料，避免圖表拉太長，這裡預設取最近 3 年 (若不足則全取)
+            start_date_limit = pd.to_datetime("today") - pd.DateOffset(years=3)
+            df['日期'] = pd.to_datetime(df['日期']) # 確保日期格式
+            df = df[df['日期'] >= start_date_limit]
+
+            if not df.empty:
+                # 歸一化邏輯：(當日價格 / 第一天價格 - 1) * 100
+                first_nav = df['NAV'].iloc[0]
+                df['累積報酬率(%)'] = ((df['NAV'] / first_nav) - 1) * 100
+                df['資產名稱'] = name
+                plot_data.append(df[['日期', '累積報酬率(%)', '資產名稱']])
+    
+    if not plot_data:
+        st.warning("選取的資產在近三年內無足夠數據可供繪圖。")
+        return
+
+    # 合併所有資料
+    final_df = pd.concat(plot_data)
+    
+    # 使用 Plotly 畫圖
+    fig = px.line(
+        final_df, 
+        x="日期", 
+        y="累積報酬率(%)", 
+        color="資產名稱",
+        title="近三年累積報酬率比較 (歸一化)",
+        hover_data={"日期": "|%Y-%m-%d"},
+        height=500
+    )
+    
+    # 優化圖表樣式
+    fig.update_layout(
+        xaxis_title="",
+        yaxis_title="累積報酬率 (%)",
+        hovermode="x unified", # 滑鼠移過去顯示所有資產數值
+        legend=dict(orientation="h", y=1.1) # 圖例放上面
+    )
+    
+    st.plotly_chart(fig, use_container_width=True)
+
 
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
@@ -300,40 +332,40 @@ def main():
             fund_input = st.text_area(
                 "基金代號 (每行一個)", 
                 value=default_ids, 
-                height=300,
+                height=300, 
                 help="請輸入基金代號，多筆請換行或用逗號分隔"
             )
             fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
 
-    # 主畫面按鈕
-    if st.button("🚀 開始分析", type="primary"):
-        # 這裡的 Spinner 會在資料抓取時轉圈圈
-        with st.spinner("正在連線至全球資料庫 (若為第一次抓取請稍候)..."):
-            all_data = {}
-            
-            # 使用快取函式 (第一次慢，第二次快)
-            if target_markets:
-                market_data = get_cached_market_data(target_markets)
-                all_data.update(market_data)
-                
-            if fund_ids:
-                fund_data = get_cached_fund_data(fund_ids)
-                all_data.update(fund_data)
+    # === 主邏輯修改：使用 session_state 或直接執行 ===
+    # 這裡我們將邏輯改為：使用者調整側邊欄 -> 點擊按鈕 -> 載入資料 (有快取) -> 顯示 Tabs
+    
+    if st.button("🚀 開始/更新 分析", type="primary"):
+        st.session_state['has_run'] = True
+
+    # 檢查是否已經按過按鈕 (讓畫面刷新時不會消失)
+    if st.session_state.get('has_run'):
         
+        # 1. 載入資料 (使用快取，速度快)
+        # 注意：我們移除了進度條，改用 st.spinner (由装饰器處理)
+        all_data = load_data_with_cache(target_markets, fund_ids)
+
         if not all_data:
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
 
-        # 建立頁籤 (Tabs) 來區分「數據報表」與「趨勢圖表」
-        tab1, tab2 = st.tabs(["📋 數據報表", "📈 趨勢圖表"])
+        # 2. 建立分頁 (Tabs)
+        tab1, tab2 = st.tabs(["📋 報表總覽", "📈 趨勢比較"])
 
+        # === 分頁 1：原本的表格與 Excel 下載 ===
         with tab1:
-            st.success(f"✅ 分析完成！共 {len(all_data)} 筆標的")
             summary_df = FundAnalyzer.analyze_all(all_data)
-            st.dataframe(summary_df.head(10))
-            
+            st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
+            st.dataframe(summary_df)
+
             excel_data = ExcelReport.create_excel_bytes(summary_df)
             file_name = f"Global_Market_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
+            
             st.download_button(
                 label="📥 下載完整 Excel 報表",
                 data=excel_data,
@@ -341,34 +373,20 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
+        # === 分頁 2：視覺化圖表 (新增功能) ===
         with tab2:
-            st.subheader("歷史走勢比較")
+            st.subheader("📈 資產走勢 PK")
+            st.caption("比較不同資產在相同時間區間內的漲跌幅表現 (近三年，起點歸零)")
             
-            # 控制項：選擇要畫的標的
-            all_options = list(all_data.keys())
-            selected_chart_items = st.multiselect(
-                "選擇要繪製的項目 (建議 3-5 項)", 
-                options=all_options,
-                default=all_options[:3] if len(all_options) >= 3 else all_options
+            # 讓使用者選擇要畫哪些圖 (預設全選，但如果太多會很亂，建議選前 5 個)
+            all_assets_list = list(all_data.keys())
+            chart_selection = st.multiselect(
+                "選擇要繪製的資產:",
+                options=all_assets_list,
+                default=all_assets_list[:5] # 預設只選前5個避免眼花
             )
             
-            # 控制項：時間範圍
-            col_date1, col_date2 = st.columns(2)
-            with col_date1:
-                # 歸一化開關
-                normalize_chart = st.checkbox("📈 歸一化比較 (以起點為 100%)", value=True, help="將不同價格單位的商品放在同一個起跑點比較漲跌幅")
-            
-            if selected_chart_items:
-                # 篩選出要畫圖的 data
-                chart_subset = {k: v for k, v in all_data.items() if k in selected_chart_items}
-                
-                # 準備繪圖資料
-                chart_df = Visualizer.prepare_chart_data(chart_subset, normalize=normalize_chart)
-                
-                # 繪製互動式線圖
-                st.line_chart(chart_df)
-            else:
-                st.info("請從上方選單選擇至少一個項目來繪製圖表")
+            plot_normalized_trends(all_data, chart_selection)
 
 if __name__ == "__main__":
     main()
