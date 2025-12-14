@@ -245,9 +245,9 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         all_data.update(fund_data)
     return all_data
 
-# === 【修改】 雙軸繪圖函式 ===
+# === 【修正】 雙軸繪圖函式 ===
 def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str]):
-    """繪製雙Y軸價格走勢圖 (最多兩個資產)"""
+    """繪製雙Y軸價格走勢比較圖 (修復 layout update 錯誤)"""
     if not selected_keys:
         st.info("請從上方選單勾選 1~2 項資產進行比較。")
         return
@@ -262,12 +262,11 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
             df['日期'] = pd.to_datetime(df['日期'])
             df = df[df['日期'] >= start_date_limit]
             
-            # 這裡我們使用原始 '基金名稱' 作為圖例名稱，而非 key
-            # 但因為 key 可能就是 ID，我們需要確保名稱正確
-            # 在 all_data 中，df['基金名稱'] 已經存了中文名稱
-            asset_name = df['基金名稱'].iloc[0] if not df.empty else key
-            
-            plot_dfs.append({"data": df, "name": asset_name})
+            if not df.empty:
+                # 確保名稱是字串格式，避免 numpy 格式導致 Plotly 報錯
+                raw_name = df['基金名稱'].iloc[0]
+                asset_name = str(raw_name) if raw_name else key
+                plot_dfs.append({"data": df, "name": asset_name})
 
     if not plot_dfs:
         st.warning("選取的資產在近三年內無足夠數據可供繪圖。")
@@ -296,30 +295,37 @@ def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List
             yaxis='y2'
         ))
 
-    # 設定 Layout (雙軸樣式)
-    layout_update = {
-        'title': '資產價格走勢比較 (近三年)',
-        'xaxis': {'title': '日期'},
-        'yaxis': {
-            'title': plot_dfs[0]["name"],
-            'titlefont': {'color': '#1f77b4'},
-            'tickfont': {'color': '#1f77b4'}
-        },
-        'hovermode': 'x unified',
-        'legend': dict(orientation="h", y=1.1)
-    }
+    # === 修正點：分段設定 Layout，避免 ValueError ===
+    
+    # 1. 設定共用基礎樣式
+    fig.update_layout(
+        title='資產價格走勢比較 (近三年)',
+        xaxis=dict(title='日期'),
+        hovermode='x unified',
+        legend=dict(orientation="h", y=1.1)
+    )
 
-    # 如果有第二條線，設定右側 Y 軸
+    # 2. 設定左側 Y 軸 (YAxis 1)
+    fig.update_layout(
+        yaxis=dict(
+            title=plot_dfs[0]["name"],
+            title_font=dict(color='#1f77b4'),
+            tickfont=dict(color='#1f77b4')
+        )
+    )
+
+    # 3. 如果有第二個資產，設定右側 Y 軸 (YAxis 2)
     if len(plot_dfs) > 1:
-        layout_update['yaxis2'] = {
-            'title': plot_dfs[1]["name"],
-            'titlefont': {'color': '#ff7f0e'},
-            'tickfont': {'color': '#ff7f0e'},
-            'overlaying': 'y',  # 疊加在第一個 Y 軸上
-            'side': 'right'     # 放在右邊
-        }
+        fig.update_layout(
+            yaxis2=dict(
+                title=plot_dfs[1]["name"],
+                title_font=dict(color='#ff7f0e'),
+                tickfont=dict(color='#ff7f0e'),
+                overlaying='y',  # 疊加在第一個 Y 軸上
+                side='right'     # 放在右邊
+            )
+        )
 
-    fig.update_layout(**layout_update)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -349,7 +355,7 @@ def main():
             )
             fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
 
-    if st.button("🚀 開始/更新 分析", type="primary"):
+    if st.button("🚀 開始分析", type="primary"):
         st.session_state['has_run'] = True
 
     if st.session_state.get('has_run'):
