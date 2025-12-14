@@ -5,7 +5,8 @@ import urllib3
 import logging
 import io
 import yfinance as yf
-import plotly.express as px  # 新增：互動式繪圖套件
+import plotly.express as px
+import plotly.graph_objects as go  # 新增：用於繪製更複雜的雙軸圖
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any
@@ -81,8 +82,6 @@ class FundScraper:
             return None
 
     def fetch_all(self, fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
-        # 注意：為了配合 Caching，這裡移除了 progress_bar 的參數傳遞
-        # 因為快取函數在背景執行時無法更新 UI 元件
         results = {}
         with ThreadPoolExecutor(max_workers=10) as executor:
             future_to_id = {executor.submit(self.fetch_nav, fid): fid for fid in fund_ids}
@@ -232,82 +231,95 @@ class ExcelReport:
             width = min(max(max_len * 0.9, 10), 50)
             worksheet.set_column(i, i, width)
 
-# === 【新增】 快取資料載入函式 ===
+# === 快取資料載入函式 ===
 @st.cache_data(ttl=3600, show_spinner="正在自網路下載最新數據...")
 def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
-    """
-    這個函式會被 Streamlit 快取。
-    只要輸入參數 (fund_ids, target_markets) 沒變，就會直接回傳上次的結果，不會重新下載。
-    """
     all_data = {}
-    
-    # 下載市場資料
     if target_markets:
         market_scraper = MarketScraper()
-        # 注意：為了 Cache 穩定，這裡不傳入 progress bar
         market_data = market_scraper.fetch_all(target_markets)
         all_data.update(market_data)
-        
-    # 下載基金資料
     if fund_ids:
         fund_scraper = FundScraper()
         fund_data = fund_scraper.fetch_all(fund_ids)
         all_data.update(fund_data)
-        
     return all_data
 
-# === 【新增】 繪圖邏輯函式 ===
-def plot_normalized_trends(all_data: Dict[str, pd.DataFrame], selected_assets: List[str]):
-    """繪製歸一化 (累積報酬率) 比較圖"""
-    if not selected_assets:
-        st.info("請從上方選單勾選至少一項資產進行比較。")
+# === 【修改】 雙軸繪圖函式 ===
+def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str]):
+    """繪製雙Y軸價格走勢圖 (最多兩個資產)"""
+    if not selected_keys:
+        st.info("請從上方選單勾選 1~2 項資產進行比較。")
         return
 
-    plot_data = []
-    
-    for name in selected_assets:
-        if name in all_data:
-            df = all_data[name].copy()
+    # 取得要畫的資料 (取最近 3 年)
+    plot_dfs = []
+    for key in selected_keys:
+        if key in all_data:
+            df = all_data[key].copy()
             df = df.sort_values('日期')
-            
-            # 過濾掉極端舊的資料，避免圖表拉太長，這裡預設取最近 3 年 (若不足則全取)
             start_date_limit = pd.to_datetime("today") - pd.DateOffset(years=3)
-            df['日期'] = pd.to_datetime(df['日期']) # 確保日期格式
+            df['日期'] = pd.to_datetime(df['日期'])
             df = df[df['日期'] >= start_date_limit]
+            
+            # 這裡我們使用原始 '基金名稱' 作為圖例名稱，而非 key
+            # 但因為 key 可能就是 ID，我們需要確保名稱正確
+            # 在 all_data 中，df['基金名稱'] 已經存了中文名稱
+            asset_name = df['基金名稱'].iloc[0] if not df.empty else key
+            
+            plot_dfs.append({"data": df, "name": asset_name})
 
-            if not df.empty:
-                # 歸一化邏輯：(當日價格 / 第一天價格 - 1) * 100
-                first_nav = df['NAV'].iloc[0]
-                df['累積報酬率(%)'] = ((df['NAV'] / first_nav) - 1) * 100
-                df['資產名稱'] = name
-                plot_data.append(df[['日期', '累積報酬率(%)', '資產名稱']])
-    
-    if not plot_data:
+    if not plot_dfs:
         st.warning("選取的資產在近三年內無足夠數據可供繪圖。")
         return
 
-    # 合併所有資料
-    final_df = pd.concat(plot_data)
-    
-    # 使用 Plotly 畫圖
-    fig = px.line(
-        final_df, 
-        x="日期", 
-        y="累積報酬率(%)", 
-        color="資產名稱",
-        title="近三年累積報酬率比較 (歸一化)",
-        hover_data={"日期": "|%Y-%m-%d"},
-        height=500
-    )
-    
-    # 優化圖表樣式
-    fig.update_layout(
-        xaxis_title="",
-        yaxis_title="累積報酬率 (%)",
-        hovermode="x unified", # 滑鼠移過去顯示所有資產數值
-        legend=dict(orientation="h", y=1.1) # 圖例放上面
-    )
-    
+    # 建立 Plotly 雙軸圖表
+    fig = go.Figure()
+
+    # 第一條線 (左軸)
+    if len(plot_dfs) > 0:
+        d1 = plot_dfs[0]
+        fig.add_trace(go.Scatter(
+            x=d1["data"]['日期'], 
+            y=d1["data"]['NAV'], 
+            name=d1["name"],
+            yaxis='y'
+        ))
+
+    # 第二條線 (右軸)
+    if len(plot_dfs) > 1:
+        d2 = plot_dfs[1]
+        fig.add_trace(go.Scatter(
+            x=d2["data"]['日期'], 
+            y=d2["data"]['NAV'], 
+            name=d2["name"],
+            yaxis='y2'
+        ))
+
+    # 設定 Layout (雙軸樣式)
+    layout_update = {
+        'title': '資產價格走勢比較 (近三年)',
+        'xaxis': {'title': '日期'},
+        'yaxis': {
+            'title': plot_dfs[0]["name"],
+            'titlefont': {'color': '#1f77b4'},
+            'tickfont': {'color': '#1f77b4'}
+        },
+        'hovermode': 'x unified',
+        'legend': dict(orientation="h", y=1.1)
+    }
+
+    # 如果有第二條線，設定右側 Y 軸
+    if len(plot_dfs) > 1:
+        layout_update['yaxis2'] = {
+            'title': plot_dfs[1]["name"],
+            'titlefont': {'color': '#ff7f0e'},
+            'tickfont': {'color': '#ff7f0e'},
+            'overlaying': 'y',  # 疊加在第一個 Y 軸上
+            'side': 'right'     # 放在右邊
+        }
+
+    fig.update_layout(**layout_update)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -337,27 +349,21 @@ def main():
             )
             fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
 
-    # === 主邏輯修改：使用 session_state 或直接執行 ===
-    # 這裡我們將邏輯改為：使用者調整側邊欄 -> 點擊按鈕 -> 載入資料 (有快取) -> 顯示 Tabs
-    
     if st.button("🚀 開始/更新 分析", type="primary"):
         st.session_state['has_run'] = True
 
-    # 檢查是否已經按過按鈕 (讓畫面刷新時不會消失)
     if st.session_state.get('has_run'):
-        
-        # 1. 載入資料 (使用快取，速度快)
-        # 注意：我們移除了進度條，改用 st.spinner (由装饰器處理)
+        # 1. 載入資料 (使用快取)
         all_data = load_data_with_cache(target_markets, fund_ids)
 
         if not all_data:
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
 
-        # 2. 建立分頁 (Tabs)
-        tab1, tab2 = st.tabs(["📋 報表總覽", "📈 趨勢比較"])
+        # 2. 建立分頁
+        tab1, tab2 = st.tabs(["📋 報表總覽", "📈 趨勢比較 (雙軸)"])
 
-        # === 分頁 1：原本的表格與 Excel 下載 ===
+        # === 分頁 1：報表 ===
         with tab1:
             summary_df = FundAnalyzer.analyze_all(all_data)
             st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
@@ -373,20 +379,37 @@ def main():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
-        # === 分頁 2：視覺化圖表 (新增功能) ===
+        # === 分頁 2：雙軸圖表 ===
         with tab2:
-            st.subheader("📈 資產走勢 PK")
-            st.caption("比較不同資產在相同時間區間內的漲跌幅表現 (近三年，起點歸零)")
+            st.subheader("📈 資產價格走勢對照")
+            st.caption("請選擇 **最多 2 項** 資產進行對照。左右 Y 軸將分別顯示各自的真實價格區間。")
             
-            # 讓使用者選擇要畫哪些圖 (預設全選，但如果太多會很亂，建議選前 5 個)
-            all_assets_list = list(all_data.keys())
-            chart_selection = st.multiselect(
-                "選擇要繪製的資產:",
-                options=all_assets_list,
-                default=all_assets_list[:5] # 預設只選前5個避免眼花
+            # 【優化】 建立 "顯示名稱 -> 資料 Key" 的對照表
+            # 這樣選單就不會只顯示冷冰冰的代號，而是顯示 "基金名稱 (代號)"
+            options_map = {}
+            for key, df in all_data.items():
+                if not df.empty:
+                    # 如果 key 是基金代號，通常是數字，我們把中文名稱加上去
+                    # 如果 key 本來就是市場名稱 (如 "比特幣")，就維持原樣
+                    fund_name = df['基金名稱'].iloc[0]
+                    if fund_name != key:
+                        display_label = f"{fund_name} ({key})"
+                    else:
+                        display_label = key
+                    
+                    options_map[display_label] = key
+
+            # 讓使用者選擇 (顯示的是優化後的 Label)
+            selected_labels = st.multiselect(
+                "選擇要繪製的資產 (Max 2):",
+                options=list(options_map.keys()),
+                max_selections=2  # 限制最多選 2 個
             )
             
-            plot_normalized_trends(all_data, chart_selection)
+            # 將 Label 轉回原本的 Key 以便撈取資料
+            selected_keys = [options_map[label] for label in selected_labels]
+            
+            plot_dual_axis_trends(all_data, selected_keys)
 
 if __name__ == "__main__":
     main()
