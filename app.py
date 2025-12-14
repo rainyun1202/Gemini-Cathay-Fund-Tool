@@ -256,95 +256,137 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         all_data.update(fund_data)
     return all_data
 
-# === 【修正】 雙軸繪圖函式 (支援多時間區間) ===
+# === 【優化】 雙軸繪圖函式 (視覺歸一化 + 真實數值軸) ===
 def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
     """
     繪製雙Y軸價格走勢比較圖
-    :param time_range_key: 使用者選擇的時間區間 (例如 "近1年")
+    特點：
+    1. 保留原始價格數值 (Y軸顯示真實股價/淨值)
+    2. 視覺上起點重合 (將兩個Y軸的 Range 鎖定在相同的相對比例)
     """
     if not selected_keys:
         st.info("請從上方選單勾選 1~2 項資產進行比較。")
         return
 
-    # 計算篩選的起始日期
+    # 1. 計算篩選的起始日期
     delta = Config.TIME_RANGES.get(time_range_key)
     if not delta:
-        # 預防萬一，預設為 1 年
         delta = relativedelta(years=1)
     
     start_date_limit = pd.to_datetime("today") - delta
 
-    # 準備繪圖資料
-    plot_dfs = []
+    # 2. 準備數據並計算 "全域相對波動範圍"
+    plot_data = []
+    global_min_ratio = 1.0
+    global_max_ratio = 1.0
+    
     for key in selected_keys:
         if key in all_data:
             df = all_data[key].copy()
             df = df.sort_values('日期')
             df['日期'] = pd.to_datetime(df['日期'])
-            
-            # 根據時間區間篩選
             df = df[df['日期'] >= start_date_limit]
             
             if not df.empty:
-                # 確保名稱是字串格式
+                # 取得起始價格 (作為基數 1)
+                start_price = df['NAV'].iloc[0]
+                
+                # 計算該資產在這段期間的相對波動 (Ratio)
+                # 目的只是為了找出大家共同的 "最大/最小漲跌幅範圍"
+                min_price = df['NAV'].min()
+                max_price = df['NAV'].max()
+                
+                min_ratio = min_price / start_price
+                max_ratio = max_price / start_price
+                
+                # 更新全域範圍
+                if min_ratio < global_min_ratio: global_min_ratio = min_ratio
+                if max_ratio > global_max_ratio: global_max_ratio = max_ratio
+
+                # 準備繪圖資訊
                 raw_name = df['基金名稱'].iloc[0]
                 asset_name = str(raw_name) if raw_name else key
-                plot_dfs.append({"data": df, "name": asset_name})
+                
+                plot_data.append({
+                    "data": df,
+                    "name": asset_name,
+                    "start_price": start_price
+                })
 
-    if not plot_dfs:
+    if not plot_data:
         st.warning(f"選取的資產在【{time_range_key}】內無足夠數據可供繪圖。")
         return
 
-    # 建立 Plotly 雙軸圖表
+    # 3. 為了讓線條不要頂天立地，上下各留 5% 緩衝空間
+    range_padding = (global_max_ratio - global_min_ratio) * 0.05
+    # 如果波動極小 (例如定存)，給一個預設緩衝
+    if range_padding == 0: range_padding = 0.01
+    
+    final_min_ratio = global_min_ratio - range_padding
+    final_max_ratio = global_max_ratio + range_padding
+
+    # 4. 建立 Plotly 雙軸圖表
     fig = go.Figure()
 
-    # 第一條線 (左軸)
-    if len(plot_dfs) > 0:
-        d1 = plot_dfs[0]
-        fig.add_trace(go.Scatter(
-            x=d1["data"]['日期'], 
-            y=d1["data"]['NAV'], 
-            name=d1["name"],
-            yaxis='y'
-        ))
+    # --- 第一個資產 (左軸) ---
+    d1 = plot_data[0]
+    fig.add_trace(go.Scatter(
+        x=d1["data"]['日期'], 
+        y=d1["data"]['NAV'], 
+        name=d1["name"],
+        yaxis='y',
+        hovertemplate='%{y:,.2f}' # 顯示千分位真實價格
+    ))
+    
+    # 計算左軸的真實價格範圍
+    y1_range = [d1["start_price"] * final_min_ratio, d1["start_price"] * final_max_ratio]
 
-    # 第二條線 (右軸)
-    if len(plot_dfs) > 1:
-        d2 = plot_dfs[1]
+    # --- 第二個資產 (右軸，如果有的話) ---
+    y2_range = None
+    if len(plot_data) > 1:
+        d2 = plot_data[1]
         fig.add_trace(go.Scatter(
             x=d2["data"]['日期'], 
             y=d2["data"]['NAV'], 
             name=d2["name"],
-            yaxis='y2'
+            yaxis='y2',
+            hovertemplate='%{y:,.2f}'
         ))
+        # 計算右軸的真實價格範圍
+        y2_range = [d2["start_price"] * final_min_ratio, d2["start_price"] * final_max_ratio]
 
-    # 設定 Layout (分段設定避免 Error)
-    # 1. 基礎樣式
+    # 5. 設定 Layout (關鍵：強制鎖定 Y 軸 Range)
+    
+    # 共用設定
     fig.update_layout(
-        title=f'資產價格走勢比較 ({time_range_key})',
+        title=f'資產價格走勢比較 ({time_range_key}) - 起點歸一化視角',
         xaxis=dict(title='日期'),
         hovermode='x unified',
         legend=dict(orientation="h", y=1.1)
     )
 
-    # 2. 左側 Y 軸
+    # 左軸設定
     fig.update_layout(
         yaxis=dict(
-            title=plot_dfs[0]["name"],
+            title=d1["name"],
             title_font=dict(color='#1f77b4'),
-            tickfont=dict(color='#1f77b4')
+            tickfont=dict(color='#1f77b4'),
+            range=y1_range, # <--- 關鍵：強制設定範圍
+            tickformat=',.2f' # 格式化軸標籤
         )
     )
 
-    # 3. 右側 Y 軸 (如果有)
-    if len(plot_dfs) > 1:
+    # 右軸設定
+    if len(plot_data) > 1:
         fig.update_layout(
             yaxis2=dict(
-                title=plot_dfs[1]["name"],
+                title=d2["name"],
                 title_font=dict(color='#ff7f0e'),
                 tickfont=dict(color='#ff7f0e'),
                 overlaying='y',
-                side='right'
+                side='right',
+                range=y2_range, # <--- 關鍵：強制設定範圍
+                tickformat=',.2f'
             )
         )
 
