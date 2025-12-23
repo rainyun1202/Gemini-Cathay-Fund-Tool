@@ -144,36 +144,51 @@ class FundAnalyzer:
         fund_name = df['基金名稱'].iloc[0]
         url = df['URL'].iloc[0]
         latest = df.iloc[-1]
+        latest_nav = latest['NAV']
         
+        # 歷史數據
         hist_max_idx = df['NAV'].idxmax()
         hist_min_idx = df['NAV'].idxmin()
 
+        # 近一年數據
         one_year_ago = df['日期'].max() - timedelta(days=365)
         df_1y = df[df['日期'] >= one_year_ago]
         
         if df_1y.empty:
             max_1y, min_1y, max_1y_date, min_1y_date = None, None, None, None
+            diff_max_1y_pct, diff_min_1y_pct = None, None
         else:
             max_1y_idx = df_1y['NAV'].idxmax()
             min_1y_idx = df_1y['NAV'].idxmin()
+            
             max_1y = df_1y.loc[max_1y_idx, 'NAV']
             max_1y_date = df_1y.loc[max_1y_idx, '日期']
+            
             min_1y = df_1y.loc[min_1y_idx, 'NAV']
             min_1y_date = df_1y.loc[min_1y_idx, '日期']
 
+            # 【新增】 計算百分比
+            # 最高價與最新價% = (最新價 - 最高價) / 最高價
+            # 最低價與最新價% = (最新價 - 最低價) / 最低價
+            diff_max_1y_pct = ((latest_nav - max_1y) / max_1y) * 100
+            diff_min_1y_pct = ((latest_nav - min_1y) / min_1y) * 100
+
+        # 【修改】 依照使用者指定順序排列 Dictionary
         return {
             "基金名稱": fund_name,
-            "基金連結": url,
-            "最新價格": latest['NAV'],
+            "最新價格": latest_nav,
             "最新價格日期": latest['日期'],
+            "近一年最高價格": max_1y,
+            "最高價與最新價%": diff_max_1y_pct,  # New
+            "近一年最高價格日期": max_1y_date,
+            "近一年最低價格": min_1y,
+            "最低價與最新價%": diff_min_1y_pct,  # New
+            "近一年最低價格日期": min_1y_date,
             "歷史最高價格": df.loc[hist_max_idx, 'NAV'],
             "歷史最高價格日期": df.loc[hist_max_idx, '日期'],
             "歷史最低價格": df.loc[hist_min_idx, 'NAV'],
             "歷史最低價格日期": df.loc[hist_min_idx, '日期'],
-            "近一年最高價格": max_1y,
-            "近一年最高價格日期": max_1y_date,
-            "近一年最低價格": min_1y,
-            "近一年最低價格日期": min_1y_date
+            "基金連結": url  # 用於生成 Excel 超連結，ExcelReport 會在輸出時移除此欄
         }
 
     @staticmethod
@@ -193,11 +208,9 @@ class BacktestEngine:
         df = df.sort_values('日期').reset_index(drop=True)
         df['日期'] = pd.to_datetime(df['日期'])
         
-        # 尋找最接近且不早於投資日期的交易日
         start_row = df[df['日期'] >= invest_date].head(1)
         
         if start_row.empty:
-            # 如果選的日期比所有數據都晚 (例如選了未來)，回傳錯誤
             return None, "選定日期無有效數據 (可能過晚)"
             
         start_price = start_row['NAV'].values[0]
@@ -206,7 +219,6 @@ class BacktestEngine:
         end_price = df['NAV'].iloc[-1]
         end_date = df['日期'].iloc[-1].date()
         
-        # 計算
         units = amount / start_price
         final_value = units * end_price
         roi = ((final_value - amount) / amount) * 100
@@ -224,55 +236,32 @@ class BacktestEngine:
 
     @staticmethod
     def calculate_dca(df: pd.DataFrame, start_date: datetime, monthly_day: int, amount: float):
-        """計算定期定額回報 (新增 start_date 參數)"""
+        """計算定期定額回報"""
         df = df.sort_values('日期').reset_index(drop=True)
         df['日期'] = pd.to_datetime(df['日期'])
         
-        # 確保 start_date 有被轉成 timestamp 比較
         start_date = pd.to_datetime(start_date)
-        
-        # 建立扣款紀錄
         records = []
         total_units = 0
         total_invested = 0
         
         data_end_date = df['日期'].iloc[-1]
-        
-        # 從使用者指定的開始日期開始跑
         current_check_date = start_date
-        
-        # 如果使用者選的日期的 "日" 超過當月天數 (例如 2/30)，relativedelta 會自動處理，這裡我們做簡單校正
-        # 策略：從 start_date 開始，每個月的 monthly_day 扣款
-        # 先找到 "第一次扣款日"
-        
-        # 如果 start_date 的日子 > monthly_day，則第一次扣款是下個月
-        # 如果 start_date 的日子 <= monthly_day，則第一次扣款是當月 (若該日還沒過)
-        # 為了簡化，我們直接從 start_date 所在的月份開始檢查
-        
         current_month_first = start_date.replace(day=1)
         
         while current_month_first <= data_end_date:
-            # 嘗試建構當月的扣款日
             try:
                 target_date = current_month_first.replace(day=monthly_day)
             except ValueError:
-                # 處理該月沒有這一天 (例如 2/30)，設為該月最後一天
                 next_month = current_month_first + relativedelta(months=1)
                 target_date = next_month - timedelta(days=1)
             
-            # 只有當 "目標扣款日" >= "使用者設定的開始日" 且 <= "資料最後一天" 才扣款
             if target_date >= start_date and target_date <= data_end_date:
-                # 找當天或之後最近的交易日
                 trade_row = df[df['日期'] >= target_date].head(1)
-                
                 if not trade_row.empty:
-                    # 檢查找到的交易日是否跳到下個月去了 (例如月底無交易，跳到下月初)
-                    # 這裡策略是：只要是有效交易日就扣，不管是否跨月，這是模擬 "順延扣款"
-                    
                     price = trade_row['NAV'].values[0]
                     trade_date = trade_row['日期'].dt.date.values[0]
                     
-                    # 避免重複紀錄 (例如同一個交易日被多次匹配)
                     if not records or records[-1]['date'] != trade_date:
                         units = amount / price
                         total_units += units
@@ -284,7 +273,6 @@ class BacktestEngine:
                             'cumulative_invested': total_invested
                         })
             
-            # 推進到下個月
             current_month_first += relativedelta(months=1)
             
         if total_invested == 0:
@@ -307,7 +295,7 @@ class BacktestEngine:
 
     @staticmethod
     def generate_quick_summary(df: pd.DataFrame):
-        """產生快速回測總表 (1M, 3M, 6M, 1Y, 3Y, 5Y, 10Y)"""
+        """產生快速回測總表"""
         periods = {
             "近 1 月": relativedelta(months=1),
             "近 3 月": relativedelta(months=3),
@@ -323,12 +311,9 @@ class BacktestEngine:
         
         for name, delta in periods.items():
             start_date = today - delta
-            
-            # 單筆 (預設 10萬)
             res_lump, err_lump = BacktestEngine.calculate_lump_sum(df, start_date, 100000)
             roi_lump = res_lump['roi'] if not err_lump else None
             
-            # DCA (預設每月5號, 5000)
             res_dca, err_dca = BacktestEngine.calculate_dca(df, start_date, 5, 5000)
             roi_dca = res_dca['roi'] if not err_dca else None
             
@@ -347,6 +332,7 @@ class ExcelReport:
     def create_excel_bytes(summary_df: pd.DataFrame) -> bytes:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            # 移除 '基金連結' 欄位，它只用於產生超連結
             display_df = summary_df.drop(columns=['基金連結'])
             display_df.to_excel(writer, index=False, header=False, sheet_name='Summary', startrow=1)
 
@@ -591,7 +577,7 @@ def main():
         with tab3:
             st.subheader("💰 投資策略回測計算機")
             
-            # 初始化 session_state 用於儲存計算結果，確保不會因為重新點擊按鈕而消失
+            # 初始化 session_state
             if 'calc_results_lump' not in st.session_state: st.session_state['calc_results_lump'] = None
             if 'calc_results_dca' not in st.session_state: st.session_state['calc_results_dca'] = None
             
@@ -621,7 +607,6 @@ def main():
                 # --- 1. 單筆投入 ---
                 with col_lump:
                     st.markdown("### 1️⃣ 單筆投入 (Lump Sum)")
-                    # 設定 max_value 為今天，預設為一年前
                     lump_date = st.date_input("買入日期", value=one_year_ago, max_value=today)
                     lump_amt = st.number_input("投入金額", value=100000, step=10000)
                     
@@ -630,7 +615,7 @@ def main():
                         if err: st.error(err)
                         else: st.session_state['calc_results_lump'] = res
 
-                    # 顯示結果 (從 session_state 讀取)
+                    # 顯示結果
                     if st.session_state['calc_results_lump']:
                         res = st.session_state['calc_results_lump']
                         color = "green" if res['roi'] >= 0 else "red"
@@ -649,7 +634,6 @@ def main():
                 # --- 2. 定期定額 ---
                 with col_dca:
                     st.markdown("### 2️⃣ 定期定額 (DCA)")
-                    # 新增 DCA 開始日期選擇
                     dca_start = st.date_input("開始扣款日期", value=one_year_ago, max_value=today)
                     dca_day = st.number_input("每月扣款日 (1-31)", value=5, min_value=1, max_value=31)
                     dca_amt = st.number_input("每期扣款金額", value=5000, step=1000)
