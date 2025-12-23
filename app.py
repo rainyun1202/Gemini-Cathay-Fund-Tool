@@ -1,29 +1,30 @@
 import streamlit as st
 import requests
 import pandas as pd
-import numpy as np  # 新增：用於數學運算
+import numpy as np
 import urllib3
 import logging
 import io
 import yfinance as yf
 import plotly.graph_objects as go
+import plotly.express as px  # 新增：用於繪製熱力圖
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any, Tuple
 from dateutil.relativedelta import relativedelta
 
-# === 全域設定 ===
+# === 0. 全域環境設定 ===
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-st.set_page_config(page_title="全球市場與基金分析", layout="wide")
+st.set_page_config(page_title="全球市場與基金分析戰情室", layout="wide")
 
 # ==========================================
 # 1. 配置與常數 (Configuration)
 # ==========================================
 class Config:
-    """全域配置類別：集中管理所有常數與設定"""
+    """全域配置類別：集中管理所有常數、API 設定與預設清單"""
     
     # --- 國泰基金 API 設定 ---
     API_URL = "https://www.cathaybk.com.tw/cathaybk/service/newwealth/fund/chartservice.asmx/GetFundNavChart"
@@ -36,13 +37,13 @@ class Config:
     DEFAULT_FUND_IDS_LIST = [
         "00580030", "00400013", "00060004", "00100045", "00010144", "00120001",
         "00040097", "10340003", "10350005", "00060003", "00400029", "00100046",
-        "00010145", "0074B060", "00120005", "00120018", "00120193", "00120002",
+        "00010145", "00740020", "00120005", "00120018", "00120193", "00120002",
         "00120134", "00100118", "00400156", "00400104", "00040052", "10020058",
         "10110022", "0074B065", "00100058", "00580062", "10310016", "00100063",
         "00560011", "00400072"
     ]
 
-    # --- 全球市場指標 ---
+    # --- 全球市場指標 (Yahoo Finance Tickers) ---
     MARKET_TICKERS = {
         # 美股 ETF
         "Vanguard S&P 500 (VOO)": "VOO",
@@ -75,6 +76,12 @@ class Config:
         "近5年": relativedelta(years=5),
         "近10年": relativedelta(years=10),
     }
+
+    @staticmethod
+    def get_start_date(time_range_key: str) -> datetime:
+        """根據時間區間 Key 計算起始日期"""
+        delta = Config.TIME_RANGES.get(time_range_key, relativedelta(years=1))
+        return datetime.now() - delta
 
 # ==========================================
 # 2. 資料獲取層 (Data Scraping Layer)
@@ -154,18 +161,20 @@ class MarketScraper:
 # 3. 資料處理與分析層 (Data Analysis Layer)
 # ==========================================
 class FundAnalyzer:
-    """負責計算各項指標與報酬率"""
+    """負責計算各項指標、報酬率與風險數據"""
+    
     @staticmethod
     def analyze_single(df: pd.DataFrame) -> Dict[str, Any]:
+        """計算單一基金的基礎統計數據 (用於報表總覽)"""
         df = df.sort_values('日期')
         fund_name = df['基金名稱'].iloc[0]
         url = df['URL'].iloc[0]
-        latest = df.iloc[-1]
-        latest_nav = latest['NAV']
+        latest_nav = df['NAV'].iloc[-1]
         
-        # 歷史數據
-        hist_max_idx = df['NAV'].idxmax()
-        hist_min_idx = df['NAV'].idxmin()
+        # 歷史極值
+        hist_max, hist_min = df['NAV'].max(), df['NAV'].min()
+        hist_max_date = df.loc[df['NAV'].idxmax(), '日期']
+        hist_min_date = df.loc[df['NAV'].idxmin(), '日期']
 
         # 近一年數據
         one_year_ago = df['日期'].max() - timedelta(days=365)
@@ -175,75 +184,104 @@ class FundAnalyzer:
             max_1y, min_1y, max_1y_date, min_1y_date = None, None, None, None
             diff_max_1y_pct, diff_min_1y_pct = None, None
         else:
-            max_1y_idx = df_1y['NAV'].idxmax()
-            min_1y_idx = df_1y['NAV'].idxmin()
+            max_1y, min_1y = df_1y['NAV'].max(), df_1y['NAV'].min()
+            max_1y_date = df_1y.loc[df_1y['NAV'].idxmax(), '日期']
+            min_1y_date = df_1y.loc[df_1y['NAV'].idxmin(), '日期']
             
-            max_1y = df_1y.loc[max_1y_idx, 'NAV']
-            max_1y_date = df_1y.loc[max_1y_idx, '日期']
-            
-            min_1y = df_1y.loc[min_1y_idx, 'NAV']
-            min_1y_date = df_1y.loc[min_1y_idx, '日期']
-
-            # 計算百分比
+            # 計算與極值的差距百分比
             diff_max_1y_pct = ((latest_nav - max_1y) / max_1y) * 100
             diff_min_1y_pct = ((latest_nav - min_1y) / min_1y) * 100
 
-        # 回傳排序後的 Dictionary
         return {
             "基金名稱": fund_name,
             "最新價格": latest_nav,
-            "最新價格日期": latest['日期'],
-            "近一年最高價格": max_1y,
-            "最高價與最新價%": diff_max_1y_pct,
-            "近一年最高價格日期": max_1y_date,
-            "近一年最低價格": min_1y,
-            "最低價與最新價%": diff_min_1y_pct,
-            "近一年最低價格日期": min_1y_date,
-            "歷史最高價格": df.loc[hist_max_idx, 'NAV'],
-            "歷史最高價格日期": df.loc[hist_max_idx, '日期'],
-            "歷史最低價格": df.loc[hist_min_idx, 'NAV'],
-            "歷史最低價格日期": df.loc[hist_min_idx, '日期'],
+            "最新價格日期": df['日期'].iloc[-1],
+            "近一年最高價格": max_1y, "最高價與最新價%": diff_max_1y_pct, "近一年最高價格日期": max_1y_date,
+            "近一年最低價格": min_1y, "最低價與最新價%": diff_min_1y_pct, "近一年最低價格日期": min_1y_date,
+            "歷史最高價格": hist_max, "歷史最高價格日期": hist_max_date,
+            "歷史最低價格": hist_min, "歷史最低價格日期": hist_min_date,
             "基金連結": url
         }
 
     @staticmethod
     def calculate_performance_metrics(df: pd.DataFrame, risk_free_rate: float) -> Dict[str, float]:
         """
-        計算進階指標：年化標準差、夏普值
+        計算進階風險指標：年化標準差、夏普值、最大回撤
         risk_free_rate: 無風險利率 (例如 4.0 代表 4%)
         """
         df = df.sort_values('日期')
-        # 計算日報酬率
         df['pct_change'] = df['NAV'].pct_change()
-        # 移除第一筆 NaN
         returns = df['pct_change'].dropna()
         
         if returns.empty:
-            return {"volatility": 0.0, "sharpe": 0.0, "annual_return": 0.0}
+            return {"volatility": 0.0, "sharpe": 0.0, "annual_return": 0.0, "mdd": 0.0}
 
-        # 1. 年化標準差 (波動率) = 日標準差 * sqrt(252)
-        volatility = returns.std() * np.sqrt(252)
+        # 1. 年化標準差 (Volatility)
+        volatility = FundAnalyzer._calculate_annualized_volatility(returns)
         
-        # 2. 年化報酬率 (幾何平均)
-        total_return = (df['NAV'].iloc[-1] / df['NAV'].iloc[0]) - 1
-        days = (df['日期'].iloc[-1] - df['日期'].iloc[0]).days
-        if days > 0:
-            annual_return = (1 + total_return) ** (365 / days) - 1
-        else:
-            annual_return = 0.0
+        # 2. 年化報酬率 (CAGR)
+        annual_return = FundAnalyzer._calculate_cagr(df)
 
-        # 3. 夏普值 = (年化報酬率 - 無風險利率) / 年化標準差
+        # 3. 夏普值 (Sharpe)
         rf_decimal = risk_free_rate / 100.0
-        if volatility > 0:
-            sharpe_ratio = (annual_return - rf_decimal) / volatility
-        else:
-            sharpe_ratio = 0.0
+        sharpe_ratio = (annual_return - rf_decimal) / volatility if volatility > 0 else 0
+
+        # 4. 最大回撤 (Max Drawdown)
+        max_drawdown = FundAnalyzer._calculate_max_drawdown(df['NAV'])
 
         return {
-            "volatility": volatility * 100, # 轉為百分比顯示
+            "volatility": volatility * 100,
             "sharpe": sharpe_ratio,
-            "annual_return": annual_return * 100
+            "annual_return": annual_return * 100,
+            "mdd": max_drawdown * 100
         }
+
+    # --- 內部輔助計算方法 (Refactored) ---
+    @staticmethod
+    def _calculate_annualized_volatility(returns: pd.Series) -> float:
+        """計算年化標準差"""
+        return returns.std() * np.sqrt(252)
+
+    @staticmethod
+    def _calculate_cagr(df: pd.DataFrame) -> float:
+        """計算年化報酬率 (CAGR)"""
+        total_return = (df['NAV'].iloc[-1] / df['NAV'].iloc[0]) - 1
+        days = (df['日期'].iloc[-1] - df['日期'].iloc[0]).days
+        if days <= 0: return 0.0
+        return (1 + total_return) ** (365 / days) - 1
+
+    @staticmethod
+    def _calculate_max_drawdown(prices: pd.Series) -> float:
+        """計算最大回撤"""
+        rolling_max = prices.cummax()
+        drawdown = (prices - rolling_max) / rolling_max
+        return drawdown.min()
+
+    @staticmethod
+    def calculate_correlation_matrix(data_map: Dict[str, pd.DataFrame], selected_keys: List[str], start_date: datetime) -> pd.DataFrame:
+        """計算多資產的相關係數矩陣"""
+        # 1. 準備合併用的 DataFrame
+        merged_df = pd.DataFrame()
+        
+        for key in selected_keys:
+            if key in data_map:
+                df = data_map[key].copy()
+                df['日期'] = pd.to_datetime(df['日期'])
+                # 篩選日期
+                df = df[df['日期'] >= start_date]
+                if not df.empty:
+                    df = df.set_index('日期')
+                    # 取出名稱作為欄位名
+                    col_name = df['基金名稱'].iloc[0]
+                    merged_df[col_name] = df['NAV']
+        
+        # 2. 計算 pct_change 並計算相關係數
+        if merged_df.empty:
+            return pd.DataFrame()
+            
+        # 使用日報酬率來計算相關性才準確，不能用價格直接算
+        returns_df = merged_df.pct_change().dropna()
+        return returns_df.corr()
 
     @staticmethod
     def analyze_all(data_map: Dict[str, pd.DataFrame]) -> pd.DataFrame:
@@ -263,29 +301,21 @@ class BacktestEngine:
         df['日期'] = pd.to_datetime(df['日期'])
         
         start_row = df[df['日期'] >= invest_date].head(1)
+        if start_row.empty: return None, "選定日期無有效數據"
         
-        if start_row.empty:
-            return None, "選定日期無有效數據 (可能過晚)"
-            
         start_price = start_row['NAV'].values[0]
         real_start_date = start_row['日期'].dt.date.values[0]
         
         end_price = df['NAV'].iloc[-1]
         end_date = df['日期'].iloc[-1].date()
         
-        units = amount / start_price
-        final_value = units * end_price
+        final_value = (amount / start_price) * end_price
         roi = ((final_value - amount) / amount) * 100
         
         return {
-            "type": "單筆投入",
-            "real_start_date": real_start_date,
-            "end_date": end_date,
-            "start_price": start_price,
-            "end_price": end_price,
-            "invested_capital": amount,
-            "final_value": final_value,
-            "roi": roi
+            "type": "單筆投入", "real_start_date": real_start_date, "end_date": end_date,
+            "start_price": start_price, "end_price": end_price,
+            "invested_capital": amount, "final_value": final_value, "roi": roi
         }, None
 
     @staticmethod
@@ -295,10 +325,7 @@ class BacktestEngine:
         df['日期'] = pd.to_datetime(df['日期'])
         
         start_date = pd.to_datetime(start_date)
-        records = []
-        total_units = 0
-        total_invested = 0
-        
+        records, total_units, total_invested = [], 0, 0
         data_end_date = df['日期'].iloc[-1]
         current_month_first = start_date.replace(day=1)
         
@@ -306,76 +333,49 @@ class BacktestEngine:
             try:
                 target_date = current_month_first.replace(day=monthly_day)
             except ValueError:
-                next_month = current_month_first + relativedelta(months=1)
-                target_date = next_month - timedelta(days=1)
+                target_date = (current_month_first + relativedelta(months=1)) - timedelta(days=1)
             
             if target_date >= start_date and target_date <= data_end_date:
                 trade_row = df[df['日期'] >= target_date].head(1)
                 if not trade_row.empty:
-                    price = trade_row['NAV'].values[0]
-                    trade_date = trade_row['日期'].dt.date.values[0]
-                    
+                    price, trade_date = trade_row['NAV'].values[0], trade_row['日期'].dt.date.values[0]
                     if not records or records[-1]['date'] != trade_date:
                         units = amount / price
                         total_units += units
                         total_invested += amount
-                        records.append({
-                            'date': trade_date,
-                            'price': price,
-                            'units': units,
-                            'cumulative_invested': total_invested
-                        })
+                        records.append({'date': trade_date, 'price': price, 'units': units, 'cumulative_invested': total_invested})
             
             current_month_first += relativedelta(months=1)
             
-        if total_invested == 0:
-            return None, "在此期間內無有效扣款紀錄"
-
-        final_price = df['NAV'].iloc[-1]
-        final_value = total_units * final_price
-        roi = ((final_value - total_invested) / total_invested) * 100
+        if total_invested == 0: return None, "在此期間內無有效紀錄"
         
+        final_value = total_units * df['NAV'].iloc[-1]
+        roi = ((final_value - total_invested) / total_invested) * 100
         return {
-            "type": "定期定額",
-            "start_date": records[0]['date'],
-            "end_date": data_end_date.date(),
-            "total_invested": total_invested,
-            "final_value": final_value,
-            "roi": roi,
-            "deduct_count": len(records),
-            "records": pd.DataFrame(records)
+            "type": "定期定額", "start_date": records[0]['date'], "end_date": data_end_date.date(),
+            "total_invested": total_invested, "final_value": final_value, "roi": roi,
+            "deduct_count": len(records), "records": pd.DataFrame(records)
         }, None
 
     @staticmethod
     def generate_quick_summary(df: pd.DataFrame):
         """產生快速回測總表"""
         periods = {
-            "近 1 月": relativedelta(months=1),
-            "近 3 月": relativedelta(months=3),
-            "近 6 月": relativedelta(months=6),
-            "近 1 年": relativedelta(years=1),
-            "近 3 年": relativedelta(years=3),
-            "近 5 年": relativedelta(years=5),
-            "近 10 年": relativedelta(years=10),
+            "近 1 月": relativedelta(months=1), "近 3 月": relativedelta(months=3),
+            "近 6 月": relativedelta(months=6), "近 1 年": relativedelta(years=1),
+            "近 3 年": relativedelta(years=3), "近 5 年": relativedelta(years=5),
+            "近 10 年": relativedelta(years=10)
         }
-        
-        results = []
-        today = datetime.now()
-        
+        results, today = [], datetime.now()
         for name, delta in periods.items():
             start_date = today - delta
-            res_lump, err_lump = BacktestEngine.calculate_lump_sum(df, start_date, 100000)
-            roi_lump = res_lump['roi'] if not err_lump else None
-            
-            res_dca, err_dca = BacktestEngine.calculate_dca(df, start_date, 5, 5000)
-            roi_dca = res_dca['roi'] if not err_dca else None
-            
+            rl, el = BacktestEngine.calculate_lump_sum(df, start_date, 100000)
+            rd, ed = BacktestEngine.calculate_dca(df, start_date, 5, 5000)
             results.append({
                 "週期": name,
-                "單筆報酬率 (%)": f"{roi_lump:.2f}" if roi_lump is not None else "-",
-                "定期定額報酬率 (%)": f"{roi_dca:.2f}" if roi_dca is not None else "-"
+                "單筆報酬率 (%)": f"{rl['roi']:.2f}" if not el else "-",
+                "定期定額報酬率 (%)": f"{rd['roi']:.2f}" if not ed else "-"
             })
-            
         return pd.DataFrame(results)
 
 # ==========================================
@@ -387,288 +387,180 @@ class ExcelReport:
     def create_excel_bytes(summary_df: pd.DataFrame) -> bytes:
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            display_df = summary_df.drop(columns=['基金連結'])
-            display_df.to_excel(writer, index=False, header=False, sheet_name='Summary', startrow=1)
-
-            workbook = writer.book
-            worksheet = writer.sheets['Summary']
-            
-            ExcelReport._apply_styles(workbook, worksheet, display_df, summary_df)
-            ExcelReport._set_columns_width(display_df, worksheet)
-            
+            df_disp = summary_df.drop(columns=['基金連結'])
+            df_disp.to_excel(writer, index=False, header=False, sheet_name='Summary', startrow=1)
+            workbook, worksheet = writer.book, writer.sheets['Summary']
+            ExcelReport._apply_styles(workbook, worksheet, df_disp, summary_df)
+            ExcelReport._set_columns_width(df_disp, worksheet)
             worksheet.freeze_panes(1, 0)
         return output.getvalue()
 
     @staticmethod
-    def _apply_styles(workbook, worksheet, display_df, original_df):
-        base_font = 'Microsoft JhengHei'
-        header_fmt = workbook.add_format({'bold': True, 'font_name': base_font, 'bg_color': '#DCE6F1', 'align': 'center', 'valign': 'vcenter', 'border': 1})
-        text_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1})
-        num_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1, 'num_format': '#,##0.00'}) 
-        link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1, 'font_name': base_font, 'valign': 'top', 'border': 1})
-        date_fmt = workbook.add_format({'num_format': 'yyyy-mm-dd', 'font_name': base_font, 'valign': 'top', 'border': 1})
-
-        for col, val in enumerate(display_df.columns):
-            worksheet.write(0, col, val, header_fmt)
-
-        date_cols = [i for i, c in enumerate(display_df.columns) if '日期' in str(c) or 'Date' in str(c)]
+    def _apply_styles(wb, ws, df, orig):
+        fmt = {
+            'header': wb.add_format({'bold': True, 'font_name': 'Microsoft JhengHei', 'bg_color': '#DCE6F1', 'align': 'center', 'border': 1}),
+            'text': wb.add_format({'font_name': 'Microsoft JhengHei', 'border': 1}),
+            'num': wb.add_format({'font_name': 'Microsoft JhengHei', 'border': 1, 'num_format': '#,##0.00'}),
+            'link': wb.add_format({'font_color': 'blue', 'underline': 1, 'font_name': 'Microsoft JhengHei', 'border': 1}),
+            'date': wb.add_format({'num_format': 'yyyy-mm-dd', 'font_name': 'Microsoft JhengHei', 'border': 1})
+        }
+        for c, v in enumerate(df.columns): ws.write(0, c, v, fmt['header'])
+        date_cols = [i for i, c in enumerate(df.columns) if '日期' in str(c)]
         
-        for i in range(len(display_df)):
-            name = display_df.iat[i, 0]
-            url = original_df.iloc[i]['基金連結']
-            worksheet.write_url(i+1, 0, url, link_fmt, string=name)
-
-            for j in range(1, len(display_df.columns)):
-                val = display_df.iat[i, j]
-                if j in date_cols and pd.notna(val):
-                    if isinstance(val, (str, datetime, pd.Timestamp)): val = pd.to_datetime(val)
-                    worksheet.write_datetime(i+1, j, val, date_fmt)
-                elif isinstance(val, (int, float)):
-                    worksheet.write_number(i+1, j, val, num_fmt)
-                else:
-                    worksheet.write(i+1, j, str(val), text_fmt)
+        for i in range(len(df)):
+            ws.write_url(i+1, 0, orig.iloc[i]['基金連結'], fmt['link'], string=df.iat[i, 0])
+            for j in range(1, len(df.columns)):
+                v = df.iat[i, j]
+                if j in date_cols and pd.notna(v): ws.write_datetime(i+1, j, pd.to_datetime(v), fmt['date'])
+                elif isinstance(v, (int, float)): ws.write_number(i+1, j, v, fmt['num'])
+                else: ws.write(i+1, j, str(v), fmt['text'])
 
     @staticmethod
-    def _set_columns_width(df, worksheet):
+    def _set_columns_width(df, ws):
         for i, col in enumerate(df.columns):
-            max_len = max(
-                df[col].astype(str).map(lambda x: len(x.encode('utf-8'))).max(),
-                len(str(col).encode('utf-8'))
-            )
-            width = min(max(max_len * 0.9, 10), 50)
-            worksheet.set_column(i, i, width)
+            ml = max(df[col].astype(str).map(lambda x: len(x.encode('utf-8'))).max(), len(str(col).encode('utf-8')))
+            ws.set_column(i, i, min(max(ml * 0.8, 10), 50))
 
 class ChartManager:
     """負責繪製 Plotly 圖表"""
+    
+    @staticmethod
+    def _filter_data(all_data, keys, tr_key):
+        """共用數據過濾邏輯"""
+        start_date = Config.get_start_date(tr_key)
+        filtered = {}
+        for k in keys:
+            if k in all_data:
+                df = all_data[k].copy().sort_values('日期')
+                df['日期'] = pd.to_datetime(df['日期'])
+                df = df[df['日期'] >= start_date]
+                if not df.empty:
+                    filtered[k] = df
+        return filtered
+
     @staticmethod
     def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
         """繪製雙Y軸價格走勢比較圖"""
-        if not selected_keys:
-            st.info("請從上方選單勾選 1~2 項資產進行比較。")
+        if not selected_keys: return
+        
+        filtered_data = ChartManager._filter_data(all_data, selected_keys, time_range_key)
+        if not filtered_data:
+            st.warning("選定區間內無數據")
             return
 
-        delta = Config.TIME_RANGES.get(time_range_key)
-        if not delta:
-            delta = relativedelta(years=1)
+        plot_dfs = []
+        global_min, global_max = 1.0, 1.0
         
-        start_date_limit = pd.to_datetime("today") - delta
+        for k, df in filtered_data.items():
+            sp = df['NAV'].iloc[0]
+            ratios = df['NAV'] / sp
+            global_min = min(global_min, ratios.min())
+            global_max = max(global_max, ratios.max())
+            plot_dfs.append({"data": df, "name": str(df['基金名稱'].iloc[0]), "sp": sp})
 
-        plot_data = []
-        global_min_ratio = 1.0
-        global_max_ratio = 1.0
-        
-        for key in selected_keys:
-            if key in all_data:
-                df = all_data[key].copy()
-                df = df.sort_values('日期')
-                df['日期'] = pd.to_datetime(df['日期'])
-                df = df[df['日期'] >= start_date_limit]
-                
-                if not df.empty:
-                    start_price = df['NAV'].iloc[0]
-                    min_price = df['NAV'].min()
-                    max_price = df['NAV'].max()
-                    
-                    min_ratio = min_price / start_price
-                    max_ratio = max_price / start_price
-                    
-                    if min_ratio < global_min_ratio: global_min_ratio = min_ratio
-                    if max_ratio > global_max_ratio: global_max_ratio = max_ratio
-
-                    raw_name = df['基金名稱'].iloc[0]
-                    asset_name = str(raw_name) if raw_name else key
-                    
-                    plot_data.append({
-                        "data": df,
-                        "name": asset_name,
-                        "start_price": start_price
-                    })
-
-        if not plot_data:
-            st.warning(f"選取的資產在【{time_range_key}】內無足夠數據可供繪圖。")
-            return
-
-        range_padding = (global_max_ratio - global_min_ratio) * 0.05
-        if range_padding == 0: range_padding = 0.01
-        
-        final_min_ratio = global_min_ratio - range_padding
-        final_max_ratio = global_max_ratio + range_padding
+        pad = (global_max - global_min) * 0.05
+        y_range_min, y_range_max = global_min - pad, global_max + pad
 
         fig = go.Figure()
-
-        d1 = plot_data[0]
-        fig.add_trace(go.Scatter(
-            x=d1["data"]['日期'], 
-            y=d1["data"]['NAV'], 
-            name=d1["name"],
-            yaxis='y',
-            hovertemplate='%{y:,.2f}'
-        ))
+        # 第一條線
+        d1 = plot_dfs[0]
+        fig.add_trace(go.Scatter(x=d1["data"]['日期'], y=d1["data"]['NAV'], name=d1["name"], yaxis='y', hovertemplate='%{y:,.2f}'))
+        y1_range = [d1["sp"] * y_range_min, d1["sp"] * y_range_max]
         
-        y1_range = [d1["start_price"] * final_min_ratio, d1["start_price"] * final_max_ratio]
+        layout_update = {
+            'title': f'資產價格走勢比較 ({time_range_key})',
+            'xaxis': dict(title='日期'), 'hovermode': 'x unified', 'legend': dict(orientation="h", y=1.1),
+            'yaxis': dict(title=d1["name"], range=y1_range, tickformat=',.2f', title_font=dict(color='#1f77b4'), tickfont=dict(color='#1f77b4'))
+        }
 
-        y2_range = None
-        if len(plot_data) > 1:
-            d2 = plot_data[1]
-            fig.add_trace(go.Scatter(
-                x=d2["data"]['日期'], 
-                y=d2["data"]['NAV'], 
-                name=d2["name"],
-                yaxis='y2',
-                hovertemplate='%{y:,.2f}'
-            ))
-            y2_range = [d2["start_price"] * final_min_ratio, d2["start_price"] * final_max_ratio]
-        
-        fig.update_layout(
-            title=f'資產價格走勢比較 ({time_range_key}) - 起點歸一化視角',
-            xaxis=dict(title='日期'),
-            hovermode='x unified',
-            legend=dict(orientation="h", y=1.1)
-        )
-
-        fig.update_layout(
-            yaxis=dict(
-                title=d1["name"],
-                title_font=dict(color='#1f77b4'),
-                tickfont=dict(color='#1f77b4'),
-                range=y1_range,
-                tickformat=',.2f'
-            )
-        )
-
-        if len(plot_data) > 1:
-            fig.update_layout(
-                yaxis2=dict(
-                    title=d2["name"],
-                    title_font=dict(color='#ff7f0e'),
-                    tickfont=dict(color='#ff7f0e'),
-                    overlaying='y',
-                    side='right',
-                    range=y2_range,
-                    tickformat=',.2f'
-                )
+        # 第二條線 (如果有)
+        if len(plot_dfs) > 1:
+            d2 = plot_dfs[1]
+            fig.add_trace(go.Scatter(x=d2["data"]['日期'], y=d2["data"]['NAV'], name=d2["name"], yaxis='y2', hovertemplate='%{y:,.2f}'))
+            y2_range = [d2["sp"] * y_range_min, d2["sp"] * y_range_max]
+            layout_update['yaxis2'] = dict(
+                title=d2["name"], overlaying='y', side='right', range=y2_range, tickformat=',.2f',
+                title_font=dict(color='#ff7f0e'), tickfont=dict(color='#ff7f0e')
             )
 
+        fig.update_layout(**layout_update)
         st.plotly_chart(fig, use_container_width=True)
 
     @staticmethod
     def plot_investment_growth(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
-        """【新增】 繪製 100 萬資金投入的增值走勢比較"""
-        if not selected_keys:
-            return # 不需要顯示錯誤，因為上面的圖表已經顯示過了
-
-        delta = Config.TIME_RANGES.get(time_range_key)
-        if not delta: delta = relativedelta(years=1)
-        start_date_limit = pd.to_datetime("today") - delta
-
-        plot_data = []
-        global_min_val = 1_000_000 # 初始本金
-        global_max_val = 1_000_000
+        """繪製 100 萬投資增值圖"""
+        if not selected_keys: return
         
-        initial_capital = 1_000_000
-
-        for key in selected_keys:
-            if key in all_data:
-                df = all_data[key].copy()
-                df = df.sort_values('日期')
-                df['日期'] = pd.to_datetime(df['日期'])
-                df = df[df['日期'] >= start_date_limit]
-                
-                if not df.empty:
-                    start_price = df['NAV'].iloc[0]
-                    # 計算增值：(當前淨值 / 起始淨值) * 本金
-                    df['Growth'] = (df['NAV'] / start_price) * initial_capital
-                    
-                    min_val = df['Growth'].min()
-                    max_val = df['Growth'].max()
-                    
-                    if min_val < global_min_val: global_min_val = min_val
-                    if max_val > global_max_val: global_max_val = max_val
-
-                    raw_name = df['基金名稱'].iloc[0]
-                    asset_name = str(raw_name) if raw_name else key
-                    
-                    plot_data.append({
-                        "data": df,
-                        "name": asset_name
-                    })
-
-        if not plot_data: return
-
-        # 緩衝範圍
-        val_range = global_max_val - global_min_val
-        padding = val_range * 0.05
-        if padding == 0: padding = 10000
-        
-        y_range = [global_min_val - padding, global_max_val + padding]
+        filtered_data = ChartManager._filter_data(all_data, selected_keys, time_range_key)
+        if not filtered_data: return
 
         fig = go.Figure()
-
-        # 這裡因為單位都是「金額 (元)」，所以使用共用 Y 軸即可，不需要雙軸
-        # 這樣更能直觀看出「誰賺得多」
-        for item in plot_data:
-            fig.add_trace(go.Scatter(
-                x=item["data"]['日期'], 
-                y=item["data"]['Growth'], 
-                name=item["name"],
-                hovertemplate='%{y:,.0f}' # 顯示整數金額
-            ))
+        initial_capital = 1_000_000
         
+        for k, df in filtered_data.items():
+            sp = df['NAV'].iloc[0]
+            growth = (df['NAV'] / sp) * initial_capital
+            fig.add_trace(go.Scatter(
+                x=df['日期'], y=growth, name=str(df['基金名稱'].iloc[0]),
+                hovertemplate='%{y:,.0f}'
+            ))
+
         fig.update_layout(
             title=f'100 萬資產增值模擬 ({time_range_key})',
             xaxis=dict(title='日期'),
-            yaxis=dict(
-                title='資產總值 (TWD/USD 依標的計價)', 
-                tickformat=',.0f',
-                range=y_range
-            ),
-            hovermode='x unified',
-            legend=dict(orientation="h", y=1.1)
+            yaxis=dict(title='資產總值 (元)', tickformat=',.0f'),
+            hovermode='x unified', legend=dict(orientation="h", y=1.1)
         )
+        st.plotly_chart(fig, use_container_width=True)
 
+    @staticmethod
+    def plot_correlation_heatmap(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
+        """【新增】繪製相關性熱力圖"""
+        if len(selected_keys) < 2:
+            st.info("請至少選擇 2 個標的以顯示相關性矩陣。")
+            return
+
+        start_date = Config.get_start_date(time_range_key)
+        corr_matrix = FundAnalyzer.calculate_correlation_matrix(all_data, selected_keys, start_date)
+        
+        if corr_matrix.empty:
+            st.warning("選定區間內無共同交易數據，無法計算相關性。")
+            return
+
+        fig = px.imshow(
+            corr_matrix, 
+            text_auto=".2f", 
+            aspect="auto",
+            color_continuous_scale="RdBu_r", # 紅藍配色 (紅=正相關, 藍=負相關)
+            zmin=-1, zmax=1,
+            title=f"資產相關性矩陣 ({time_range_key})"
+        )
         st.plotly_chart(fig, use_container_width=True)
 
 # ==========================================
-# 5. 應用程式邏輯與 UI 層 (Application Logic & UI)
+# 5. 應用程式邏輯 (Application Logic)
 # ==========================================
 
-@st.cache_data(ttl=3600, show_spinner="正在自網路下載最新數據...")
+@st.cache_data(ttl=3600, show_spinner="正在載入數據...")
 def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
     """快取資料載入函式"""
     all_data = {}
-    if target_markets:
-        market_scraper = MarketScraper()
-        market_data = market_scraper.fetch_all(target_markets)
-        all_data.update(market_data)
-    if fund_ids:
-        fund_scraper = FundScraper()
-        fund_data = fund_scraper.fetch_all(fund_ids)
-        all_data.update(fund_data)
+    if target_markets: all_data.update(MarketScraper().fetch_all(target_markets))
+    if fund_ids: all_data.update(FundScraper().fetch_all(fund_ids))
     return all_data
 
 def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
     """渲染側邊欄並回傳使用者的選擇"""
     with st.sidebar:
         st.header("⚙️ 設定面板")
-        
         with st.expander("🌍 全球市場指標", expanded=True):
-            selected_markets = st.multiselect(
-                "選擇關注市場指標",
-                options=list(Config.MARKET_TICKERS.keys()),
-                default=list(Config.MARKET_TICKERS.keys())
+            selected_market_names = st.multiselect(
+                "選擇指標", options=list(Config.MARKET_TICKERS.keys()), default=list(Config.MARKET_TICKERS.keys())
             )
-            target_markets = {name: Config.MARKET_TICKERS[name] for name in selected_markets}
-
+            target_markets = {n: Config.MARKET_TICKERS[n] for n in selected_market_names}
         with st.expander("🏦 國泰基金清單", expanded=True):
-            default_ids = ",\n".join(Config.DEFAULT_FUND_IDS_LIST)
-            fund_input = st.text_area(
-                "基金代號 (每行一個)", 
-                value=default_ids, 
-                height=300, 
-                help="請輸入基金代號，多筆請換行或用逗號分隔"
-            )
-            fund_ids = [x.strip() for x in fund_input.replace("\n", ",").split(",") if x.strip()]
-            
+            fund_input_str = st.text_area("基金代號", value=",\n".join(Config.DEFAULT_FUND_IDS_LIST), height=300)
+            fund_ids = [x.strip() for x in fund_input_str.replace("\n", ",").split(",") if x.strip()]
     return target_markets, fund_ids
 
 def render_tab_overview(all_data: Dict[str, pd.DataFrame]):
@@ -676,192 +568,128 @@ def render_tab_overview(all_data: Dict[str, pd.DataFrame]):
     summary_df = FundAnalyzer.analyze_all(all_data)
     st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
     st.dataframe(summary_df)
-
     excel_data = ExcelReport.create_excel_bytes(summary_df)
-    file_name = f"Global_Market_Report_{datetime.now().strftime('%Y%m%d')}.xlsx"
-    st.download_button("📥 下載完整 Excel 報表", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("📥 下載 Excel 報表", excel_data, f"Global_Report_{datetime.now().strftime('%Y%m%d')}.xlsx")
 
 def render_tab_chart(all_data: Dict[str, pd.DataFrame], options_map: Dict[str, str]):
-    """渲染分頁 2：趨勢比較 (包含風險指標與增值圖表)"""
+    """渲染分頁 2：趨勢與風險分析"""
     st.subheader("資產價格與風險分析")
     
-    # 1. 控制項
-    time_range = st.radio("選擇時間區間:", options=list(Config.TIME_RANGES.keys()), index=3, horizontal=True)
-    selected_labels = st.multiselect("選擇要繪製的資產 (Max 2):", options=list(options_map.keys()), max_selections=2)
-    selected_keys = [options_map[label] for label in selected_labels]
+    # 控制項
+    time_range = st.radio("區間:", options=list(Config.TIME_RANGES.keys()), index=3, horizontal=True)
+    selected_labels = st.multiselect("選擇資產 (建議 2-5 個):", options=list(options_map.keys()), max_selections=None) # 解除數量限制以便觀看相關性
+    selected_keys = [options_map[l] for l in selected_labels]
     
-    # 2. 獲取無風險利率 (美國 10 年期公債殖利率)
-    # 嘗試從資料庫中獲取 ^TNX 的最新價格，若無則預設為 4.0%
-    rf_rate_val = 4.0
-    tnx_key = Config.MARKET_TICKERS.get("美國 10 年期公債殖利率") # ^TNX
+    # 獲取無風險利率 (^TNX)
+    rf_rate = 4.0
+    tnx_key = "美國 10 年期公債殖利率"
+    if tnx_key in all_data and not all_data[tnx_key].empty:
+        rf_rate = all_data[tnx_key]['NAV'].iloc[-1]
     
-    # 檢查 ^TNX 是否在資料中 (可能使用者沒選，或者名稱 Key 不同)
-    # 這裡我們用 "美國 10 年期公債殖利率" 這個 Key 來找
-    tnx_data_key = "美國 10 年期公債殖利率"
-    if tnx_data_key in all_data:
-        tnx_df = all_data[tnx_data_key]
-        if not tnx_df.empty:
-            rf_rate_val = tnx_df['NAV'].iloc[-1]
-    
-    # 3. 顯示風險指標 Metrics
     if selected_keys:
-        st.markdown("##### 📊 風險與報酬指標 (年化)")
-        cols = st.columns(len(selected_keys))
+        # --- 1. 風險指標 ---
+        st.markdown("##### 📊 風險與報酬指標 (區間年化)")
         
-        delta = Config.TIME_RANGES.get(time_range)
-        start_limit = pd.to_datetime("today") - delta
+        # 限制指標顯示數量，避免版面過擠
+        display_limit = 4
+        display_keys = selected_keys[:display_limit]
+        cols = st.columns(max(len(display_keys), 1))
         
-        for idx, key in enumerate(selected_keys):
-            if key in all_data:
-                df = all_data[key].copy()
-                df['日期'] = pd.to_datetime(df['日期'])
-                # 篩選區間內的資料來計算指標
-                df_period = df[df['日期'] >= start_limit]
-                
-                metrics = FundAnalyzer.calculate_performance_metrics(df_period, rf_rate_val)
-                fund_name = df['基金名稱'].iloc[0]
+        filtered_data = ChartManager._filter_data(all_data, display_keys, time_range)
+        
+        for idx, key in enumerate(display_keys):
+            if key in filtered_data:
+                df_period = filtered_data[key]
+                metrics = FundAnalyzer.calculate_performance_metrics(df_period, rf_rate)
+                name = df_period['基金名稱'].iloc[0]
                 
                 with cols[idx]:
-                    st.metric(
-                        label=fund_name,
-                        value=f"Sharpe: {metrics['sharpe']:.2f}",
-                        delta=f"波動度: {metrics['volatility']:.2f}%",
-                        delta_color="inverse" # 波動度低是好的，但這裡僅作顏色區分
-                    )
+                    st.markdown(f"**{name}**")
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Sharpe", f"{metrics['sharpe']:.2f}")
+                    c2.metric("波動度", f"{metrics['volatility']:.1f}%")
+                    c3.metric("Max Drawdown", f"{metrics['mdd']:.1f}%", delta_color="inverse")
         
-        st.caption(f"* 註：無風險利率採用【美國 10 年期公債殖利率】最新報價：{rf_rate_val:.2f}%")
+        if len(selected_keys) > display_limit:
+            st.caption(f"* 僅顯示前 {display_limit} 筆資產的詳細指標，更多資產請至下方圖表查看。")
+
+        st.caption(f"* 無風險利率採用【美國 10 年期公債殖利率】：{rf_rate:.2f}%")
+        st.divider()
+        
+        # --- 2. 相關性矩陣 (New) ---
+        with st.expander("🔗 資產相關性矩陣 (Correlation Heatmap)", expanded=True):
+            ChartManager.plot_correlation_heatmap(all_data, selected_keys, time_range)
+        
         st.divider()
 
-    # 4. 繪製圖表
-    ChartManager.plot_dual_axis_trends(all_data, selected_keys, time_range)
-    st.divider()
-    ChartManager.plot_investment_growth(all_data, selected_keys, time_range)
+        # --- 3. 圖表 ---
+        # 為了雙軸圖表的可讀性，我們只取前兩個
+        plot_keys_dual = selected_keys[:2]
+        ChartManager.plot_dual_axis_trends(all_data, plot_keys_dual, time_range)
+        if len(selected_keys) > 2:
+            st.caption("* 雙軸走勢圖僅顯示前 2 個選定項目，以確保可讀性。")
+            
+        st.divider()
+        ChartManager.plot_investment_growth(all_data, selected_keys, time_range)
 
 def render_tab_backtest(all_data: Dict[str, pd.DataFrame], options_map: Dict[str, str]):
     """渲染分頁 3：投資回測"""
-    st.subheader("💰 投資策略回測計算機")
-    
-    # 初始化 session_state
-    if 'calc_results_lump' not in st.session_state: st.session_state['calc_results_lump'] = None
-    if 'calc_results_dca' not in st.session_state: st.session_state['calc_results_dca'] = None
-    
-    # 選擇標的邏輯
-    current_target = st.selectbox("請選擇回測標的:", list(options_map.keys()))
-    if 'last_target' not in st.session_state or st.session_state['last_target'] != current_target:
-        st.session_state['last_target'] = current_target
-        st.session_state['calc_results_lump'] = None
-        st.session_state['calc_results_dca'] = None
-        
-    target_key = options_map[current_target]
-    target_df = all_data.get(target_key)
-
-    if target_df is None or target_df.empty:
-        st.error("此標的無數據，無法回測")
-    else:
-        # 0. 顯示快速總覽 (Quick Stats)
-        st.markdown("##### ⚡ 歷史報酬率速覽")
-        quick_stats_df = BacktestEngine.generate_quick_summary(target_df)
-        st.dataframe(quick_stats_df, hide_index=True)
-        st.divider()
-
-        col_lump, col_dca = st.columns(2)
-        today = datetime.now()
-        one_year_ago = today - relativedelta(years=1)
-
-        # --- 1. 單筆投入 ---
-        with col_lump:
-            st.markdown("### 1️⃣ 單筆投入 (Lump Sum)")
-            lump_date = st.date_input("買入日期", value=one_year_ago, max_value=today)
-            lump_amt = st.number_input("投入金額", value=100000, step=10000)
+    st.subheader("💰 策略回測")
+    # 初始化 Session State
+    for key in ['calc_results_lump', 'calc_results_dca']:
+        if key not in st.session_state: st.session_state[key] = None
             
-            if st.button("計算單筆報酬"):
-                res, err = BacktestEngine.calculate_lump_sum(target_df, pd.to_datetime(lump_date), lump_amt)
-                if err: st.error(err)
-                else: st.session_state['calc_results_lump'] = res
-
+    target_label = st.selectbox("標的:", list(options_map.keys()))
+    if st.session_state.get('last_target') != target_label:
+        st.session_state.update({'last_target': target_label, 'calc_results_lump': None, 'calc_results_dca': None})
+    
+    target_df = all_data.get(options_map[target_label])
+    if target_df is not None:
+        st.dataframe(BacktestEngine.generate_quick_summary(target_df), hide_index=True)
+        col_lump, col_dca = st.columns(2)
+        
+        with col_lump:
+            st.markdown("### 1️⃣ 單筆投入")
+            ld = st.date_input("買入日", value=datetime.now()-relativedelta(years=1), max_value=datetime.now())
+            la = st.number_input("投入金額", value=1000000, step=100000)
+            if st.button("計算單筆"): 
+                st.session_state['calc_results_lump'], _ = BacktestEngine.calculate_lump_sum(target_df, pd.to_datetime(ld), la)
+            
             if st.session_state['calc_results_lump']:
                 res = st.session_state['calc_results_lump']
-                color = "green" if res['roi'] >= 0 else "red"
-                st.markdown(f"""
-                <div style='background-color:#f0f2f6; padding:15px; border-radius:10px'>
-                    <h4 style='margin-top:0'>📊 單筆回測結果</h4>
-                    <ul>
-                        <li><b>實際買入日</b>: {res['real_start_date']} (淨值: {res['start_price']:.2f})</li>
-                        <li><b>結算日</b>: {res['end_date']} (淨值: {res['end_price']:.2f})</li>
-                        <li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li>
-                        <li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li>
-                    </ul>
-                </div>
-                """, unsafe_allow_html=True)
+                c = "green" if res['roi'] >= 0 else "red"
+                st.markdown(f"市值: **{res['final_value']:,.0f}** (ROI: <span style='color:{c}'>{res['roi']:.2f}%</span>)", unsafe_allow_html=True)
 
-        # --- 2. 定期定額 ---
         with col_dca:
-            st.markdown("### 2️⃣ 定期定額 (DCA)")
-            dca_start = st.date_input("開始扣款日期", value=one_year_ago, max_value=today)
-            dca_day = st.number_input("每月扣款日 (1-31)", value=5, min_value=1, max_value=31)
-            dca_amt = st.number_input("每期扣款金額", value=5000, step=1000)
+            st.markdown("### 2️⃣ 定期定額")
+            ds = st.date_input("開始日", value=datetime.now()-relativedelta(years=1), max_value=datetime.now())
+            dd, da = st.number_input("扣款日", 1, 31, 5), st.number_input("每期金額", value=10000, step=1000)
+            if st.button("計算 DCA"): 
+                st.session_state['calc_results_dca'], _ = BacktestEngine.calculate_dca(target_df, pd.to_datetime(ds), dd, da)
             
-            if st.button("計算定期定額"):
-                res, err = BacktestEngine.calculate_dca(target_df, pd.to_datetime(dca_start), dca_day, dca_amt)
-                if err: st.error(err)
-                else: st.session_state['calc_results_dca'] = res
-                
             if st.session_state['calc_results_dca']:
                 res = st.session_state['calc_results_dca']
-                color = "green" if res['roi'] >= 0 else "red"
-                st.markdown(f"""
-                <div style='background-color:#f0f2f6; padding:15px; border-radius:10px'>
-                    <h4 style='margin-top:0'>📊 定期定額結果</h4>
-                    <ul>
-                        <li><b>回測期間</b>: {res['start_date']} ~ {res['end_date']}</li>
-                        <li><b>總扣款次數</b>: {res['deduct_count']} 次</li>
-                        <li><b>總投入本金</b>: {res['total_invested']:,} 元</li>
-                        <li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li>
-                        <li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li>
-                    </ul>
-                </div>
-                """, unsafe_allow_html=True)
-                with st.expander("查看詳細扣款紀錄"):
-                    st.dataframe(res['records'], hide_index=True)
+                c = "green" if res['roi'] >= 0 else "red"
+                st.markdown(f"市值: **{res['final_value']:,.0f}** (ROI: <span style='color:{c}'>{res['roi']:.2f}%</span>)", unsafe_allow_html=True)
+                with st.expander("詳細紀錄"): st.dataframe(res['records'], hide_index=True)
 
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
-    st.markdown("整合 **國泰基金** 與 **全球關鍵市場指標** 的自動化分析工具。")
-
-    # 1. 渲染側邊欄並取得設定
     target_markets, fund_ids = render_sidebar()
 
-    # 2. 觸發按鈕
     if st.button("🚀 開始/更新 分析", type="primary"):
         st.session_state['has_run'] = True
 
-    # 3. 執行主邏輯
     if st.session_state.get('has_run'):
         all_data = load_data_with_cache(target_markets, fund_ids)
+        if not all_data: return st.error("❌ 未取得資料")
 
-        if not all_data:
-            st.error("❌ 未取得任何資料，請檢查網路或代號。")
-            return
-
-        # 建立選項對照表 (顯示名稱 -> 原始Key)
-        options_map = {}
-        for key, df in all_data.items():
-            if not df.empty:
-                fund_name = df['基金名稱'].iloc[0]
-                display_label = f"{fund_name} ({key})" if fund_name != key else key
-                options_map[display_label] = key
-
-        # 4. 渲染分頁
-        tab1, tab2, tab3 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測"])
-
-        with tab1:
-            render_tab_overview(all_data)
+        options_map = {f"{df['基金名稱'].iloc[0]} ({k})" if df['基金名稱'].iloc[0] != k else k: k for k, df in all_data.items() if not df.empty}
         
-        with tab2:
-            render_tab_chart(all_data, options_map)
-            
-        with tab3:
-            render_tab_backtest(all_data, options_map)
+        t1, t2, t3 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測"])
+        with t1: render_tab_overview(all_data)
+        with t2: render_tab_chart(all_data, options_map)
+        with t3: render_tab_backtest(all_data, options_map)
 
 if __name__ == "__main__":
     main()
