@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import numpy as np  # 新增：用於數學運算
 import urllib3
 import logging
 import io
@@ -35,13 +36,13 @@ class Config:
     DEFAULT_FUND_IDS_LIST = [
         "00580030", "00400013", "00060004", "00100045", "00010144", "00120001",
         "00040097", "10340003", "10350005", "00060003", "00400029", "00100046",
-        "00010145", "00740020", "00120005", "00120018", "00120193", "00120002",
+        "00010145", "0074B060", "00120005", "00120018", "00120193", "00120002",
         "00120134", "00100118", "00400156", "00400104", "00040052", "10020058",
         "10110022", "0074B065", "00100058", "00580062", "10310016", "00100063",
         "00560011", "00400072"
     ]
 
-    # --- 全球市場指標 (新增 VOO, VXUS, QQQ, BNDW, NLR) ---
+    # --- 全球市場指標 ---
     MARKET_TICKERS = {
         # 美股 ETF
         "Vanguard S&P 500 (VOO)": "VOO",
@@ -206,6 +207,45 @@ class FundAnalyzer:
         }
 
     @staticmethod
+    def calculate_performance_metrics(df: pd.DataFrame, risk_free_rate: float) -> Dict[str, float]:
+        """
+        計算進階指標：年化標準差、夏普值
+        risk_free_rate: 無風險利率 (例如 4.0 代表 4%)
+        """
+        df = df.sort_values('日期')
+        # 計算日報酬率
+        df['pct_change'] = df['NAV'].pct_change()
+        # 移除第一筆 NaN
+        returns = df['pct_change'].dropna()
+        
+        if returns.empty:
+            return {"volatility": 0.0, "sharpe": 0.0, "annual_return": 0.0}
+
+        # 1. 年化標準差 (波動率) = 日標準差 * sqrt(252)
+        volatility = returns.std() * np.sqrt(252)
+        
+        # 2. 年化報酬率 (幾何平均)
+        total_return = (df['NAV'].iloc[-1] / df['NAV'].iloc[0]) - 1
+        days = (df['日期'].iloc[-1] - df['日期'].iloc[0]).days
+        if days > 0:
+            annual_return = (1 + total_return) ** (365 / days) - 1
+        else:
+            annual_return = 0.0
+
+        # 3. 夏普值 = (年化報酬率 - 無風險利率) / 年化標準差
+        rf_decimal = risk_free_rate / 100.0
+        if volatility > 0:
+            sharpe_ratio = (annual_return - rf_decimal) / volatility
+        else:
+            sharpe_ratio = 0.0
+
+        return {
+            "volatility": volatility * 100, # 轉為百分比顯示
+            "sharpe": sharpe_ratio,
+            "annual_return": annual_return * 100
+        }
+
+    @staticmethod
     def analyze_all(data_map: Dict[str, pd.DataFrame]) -> pd.DataFrame:
         summary_list = []
         for df in data_map.values():
@@ -214,7 +254,7 @@ class FundAnalyzer:
 
 
 class BacktestEngine:
-    """回測計算引擎：負責單筆與定期定額計算"""
+    """回測計算引擎"""
     
     @staticmethod
     def calculate_lump_sum(df: pd.DataFrame, invest_date: datetime, amount: float):
@@ -402,6 +442,7 @@ class ChartManager:
     """負責繪製 Plotly 圖表"""
     @staticmethod
     def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
+        """繪製雙Y軸價格走勢比較圖"""
         if not selected_keys:
             st.info("請從上方選單勾選 1~2 項資產進行比較。")
             return
@@ -510,6 +551,83 @@ class ChartManager:
 
         st.plotly_chart(fig, use_container_width=True)
 
+    @staticmethod
+    def plot_investment_growth(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
+        """【新增】 繪製 100 萬資金投入的增值走勢比較"""
+        if not selected_keys:
+            return # 不需要顯示錯誤，因為上面的圖表已經顯示過了
+
+        delta = Config.TIME_RANGES.get(time_range_key)
+        if not delta: delta = relativedelta(years=1)
+        start_date_limit = pd.to_datetime("today") - delta
+
+        plot_data = []
+        global_min_val = 1_000_000 # 初始本金
+        global_max_val = 1_000_000
+        
+        initial_capital = 1_000_000
+
+        for key in selected_keys:
+            if key in all_data:
+                df = all_data[key].copy()
+                df = df.sort_values('日期')
+                df['日期'] = pd.to_datetime(df['日期'])
+                df = df[df['日期'] >= start_date_limit]
+                
+                if not df.empty:
+                    start_price = df['NAV'].iloc[0]
+                    # 計算增值：(當前淨值 / 起始淨值) * 本金
+                    df['Growth'] = (df['NAV'] / start_price) * initial_capital
+                    
+                    min_val = df['Growth'].min()
+                    max_val = df['Growth'].max()
+                    
+                    if min_val < global_min_val: global_min_val = min_val
+                    if max_val > global_max_val: global_max_val = max_val
+
+                    raw_name = df['基金名稱'].iloc[0]
+                    asset_name = str(raw_name) if raw_name else key
+                    
+                    plot_data.append({
+                        "data": df,
+                        "name": asset_name
+                    })
+
+        if not plot_data: return
+
+        # 緩衝範圍
+        val_range = global_max_val - global_min_val
+        padding = val_range * 0.05
+        if padding == 0: padding = 10000
+        
+        y_range = [global_min_val - padding, global_max_val + padding]
+
+        fig = go.Figure()
+
+        # 這裡因為單位都是「金額 (元)」，所以使用共用 Y 軸即可，不需要雙軸
+        # 這樣更能直觀看出「誰賺得多」
+        for item in plot_data:
+            fig.add_trace(go.Scatter(
+                x=item["data"]['日期'], 
+                y=item["data"]['Growth'], 
+                name=item["name"],
+                hovertemplate='%{y:,.0f}' # 顯示整數金額
+            ))
+        
+        fig.update_layout(
+            title=f'100 萬資產增值模擬 ({time_range_key})',
+            xaxis=dict(title='日期'),
+            yaxis=dict(
+                title='資產總值 (TWD/USD 依標的計價)', 
+                tickformat=',.0f',
+                range=y_range
+            ),
+            hovermode='x unified',
+            legend=dict(orientation="h", y=1.1)
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
 # ==========================================
 # 5. 應用程式邏輯與 UI 層 (Application Logic & UI)
 # ==========================================
@@ -564,12 +682,60 @@ def render_tab_overview(all_data: Dict[str, pd.DataFrame]):
     st.download_button("📥 下載完整 Excel 報表", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 def render_tab_chart(all_data: Dict[str, pd.DataFrame], options_map: Dict[str, str]):
-    """渲染分頁 2：趨勢比較"""
-    st.subheader("資產價格走勢分析")
+    """渲染分頁 2：趨勢比較 (包含風險指標與增值圖表)"""
+    st.subheader("資產價格與風險分析")
+    
+    # 1. 控制項
     time_range = st.radio("選擇時間區間:", options=list(Config.TIME_RANGES.keys()), index=3, horizontal=True)
     selected_labels = st.multiselect("選擇要繪製的資產 (Max 2):", options=list(options_map.keys()), max_selections=2)
     selected_keys = [options_map[label] for label in selected_labels]
+    
+    # 2. 獲取無風險利率 (美國 10 年期公債殖利率)
+    # 嘗試從資料庫中獲取 ^TNX 的最新價格，若無則預設為 4.0%
+    rf_rate_val = 4.0
+    tnx_key = Config.MARKET_TICKERS.get("美國 10 年期公債殖利率") # ^TNX
+    
+    # 檢查 ^TNX 是否在資料中 (可能使用者沒選，或者名稱 Key 不同)
+    # 這裡我們用 "美國 10 年期公債殖利率" 這個 Key 來找
+    tnx_data_key = "美國 10 年期公債殖利率"
+    if tnx_data_key in all_data:
+        tnx_df = all_data[tnx_data_key]
+        if not tnx_df.empty:
+            rf_rate_val = tnx_df['NAV'].iloc[-1]
+    
+    # 3. 顯示風險指標 Metrics
+    if selected_keys:
+        st.markdown("##### 📊 風險與報酬指標 (年化)")
+        cols = st.columns(len(selected_keys))
+        
+        delta = Config.TIME_RANGES.get(time_range)
+        start_limit = pd.to_datetime("today") - delta
+        
+        for idx, key in enumerate(selected_keys):
+            if key in all_data:
+                df = all_data[key].copy()
+                df['日期'] = pd.to_datetime(df['日期'])
+                # 篩選區間內的資料來計算指標
+                df_period = df[df['日期'] >= start_limit]
+                
+                metrics = FundAnalyzer.calculate_performance_metrics(df_period, rf_rate_val)
+                fund_name = df['基金名稱'].iloc[0]
+                
+                with cols[idx]:
+                    st.metric(
+                        label=fund_name,
+                        value=f"Sharpe: {metrics['sharpe']:.2f}",
+                        delta=f"波動度: {metrics['volatility']:.2f}%",
+                        delta_color="inverse" # 波動度低是好的，但這裡僅作顏色區分
+                    )
+        
+        st.caption(f"* 註：無風險利率採用【美國 10 年期公債殖利率】最新報價：{rf_rate_val:.2f}%")
+        st.divider()
+
+    # 4. 繪製圖表
     ChartManager.plot_dual_axis_trends(all_data, selected_keys, time_range)
+    st.divider()
+    ChartManager.plot_investment_growth(all_data, selected_keys, time_range)
 
 def render_tab_backtest(all_data: Dict[str, pd.DataFrame], options_map: Dict[str, str]):
     """渲染分頁 3：投資回測"""
