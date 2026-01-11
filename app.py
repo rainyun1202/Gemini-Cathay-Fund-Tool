@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import urllib3
@@ -28,14 +27,19 @@ st.set_page_config(page_title="全球市場與基金分析", layout="wide")
 def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Dict[str, pd.DataFrame]:
     """快取資料載入函式"""
     all_data = {}
+    
+    # 1. 下載市場數據
     if target_markets:
         market_scraper = MarketScraper()
         market_data = market_scraper.fetch_all(target_markets)
         all_data.update(market_data)
+        
+    # 2. 下載基金數據
     if fund_ids:
         fund_scraper = FundScraper()
         fund_data = fund_scraper.fetch_all(fund_ids)
         all_data.update(fund_data)
+        
     return all_data
 
 def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
@@ -64,10 +68,10 @@ def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
             
     return target_markets, fund_ids
 
-def render_tab_overview(all_data: Dict[str, pd.DataFrame]):
+def render_tab_overview(all_data: Dict[str, pd.DataFrame], full_sort_list: List[Dict]):
     """渲染分頁 1：報表總覽"""
-    # 這裡傳入 FUND_WATCH_LIST，讓 Analyzer 依照此順序產生報表
-    summary_df = FundAnalyzer.analyze_all(all_data, sort_list=Config.FUND_WATCH_LIST)
+    # 這裡傳入整合後的 full_sort_list (市場在前，基金在後)
+    summary_df = FundAnalyzer.analyze_all(all_data, sort_list=full_sort_list)
     
     st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
     st.dataframe(summary_df)
@@ -81,12 +85,14 @@ def render_tab_chart(all_data: Dict[str, pd.DataFrame], options_map: Dict[str, s
     st.subheader("資產價格與風險分析")
     
     time_range = st.radio("選擇時間區間:", options=list(Config.TIME_RANGES.keys()), index=3, horizontal=True)
+    
+    # 使用 options_map 的 keys (已經排好序：市場在前，基金在後)
     selected_labels = st.multiselect("選擇要繪製的資產 (Max 2):", options=list(options_map.keys()), max_selections=2)
     selected_keys = [options_map[label] for label in selected_labels]
     
+    # 獲取無風險利率
     rf_rate_val = 4.0
-    tnx_key = Config.MARKET_TICKERS.get("美國 10 年期公債殖利率")
-    tnx_data_key = "美國 10 年期公債殖利率"
+    tnx_data_key = "美國 10 年期公債殖利率" # 對應 Config Key
     if tnx_data_key in all_data:
         tnx_df = all_data[tnx_data_key]
         if not tnx_df.empty:
@@ -130,6 +136,7 @@ def render_tab_backtest(all_data: Dict[str, pd.DataFrame], options_map: Dict[str
     if 'calc_results_lump' not in st.session_state: st.session_state['calc_results_lump'] = None
     if 'calc_results_dca' not in st.session_state: st.session_state['calc_results_dca'] = None
     
+    # options_map 已經是有序的 (市場 -> 基金)
     current_target = st.selectbox("請選擇回測標的:", list(options_map.keys()))
     if 'last_target' not in st.session_state or st.session_state['last_target'] != current_target:
         st.session_state['last_target'] = current_target
@@ -221,21 +228,28 @@ def main():
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
 
-        # === 核心修改：覆寫基金名稱與順序 ===
-        # 在生成選單和圖表之前，先更新 all_data 內的名稱
+        # === 核心邏輯：名稱覆寫與排序處理 ===
+        
+        # 1. 覆寫基金名稱 (自定義名稱)
         for item in Config.FUND_WATCH_LIST:
             fid = item['id']
             custom_name = item['name']
             if fid in all_data:
-                # 覆寫 DataFrame 內的「基金名稱」欄位
                 all_data[fid]['基金名稱'] = custom_name
         
-        # 建立選項對照表 (顯示名稱 -> 原始Key)
+        # 2. 建立「顯示選單 (options_map)」
+        # 邏輯：先加入市場指標，再加入基金，確保市場指標排在上面
         options_map = {}
-        # 為了讓下拉選單也依照順序，我們先遍歷 Config 列表
         processed_keys = set()
         
-        # 1. 先加入 Config 清單中的項目
+        # (A) 市場指標 (從 Config.MARKET_TICKERS 順序抓取)
+        # 注意：MarketScraper 的資料 key 是「名稱」(如 "Vanguard S&P 500 (VOO)")
+        for market_name in Config.MARKET_TICKERS.keys():
+            if market_name in all_data:
+                options_map[market_name] = market_name # key 和顯示名稱相同
+                processed_keys.add(market_name)
+
+        # (B) 基金 (從 Config.FUND_WATCH_LIST 順序抓取)
         for item in Config.FUND_WATCH_LIST:
             fid = item['id']
             if fid in all_data:
@@ -244,7 +258,7 @@ def main():
                 options_map[display_label] = fid
                 processed_keys.add(fid)
 
-        # 2. 加入剩餘的項目 (如市場指標)
+        # (C) 剩下的 (防呆機制，避免有資料但沒顯示)
         for key, df in all_data.items():
             if key not in processed_keys:
                 if not df.empty:
@@ -252,10 +266,17 @@ def main():
                     display_label = f"{fund_name} ({key})" if fund_name != key else key
                     options_map[display_label] = key
 
+        # 3. 建立「報表排序清單 (full_sort_list)」
+        # 邏輯：將市場指標轉為 {'id': name, 'name': name} 格式，併入基金清單前方
+        market_sort_list = [{'id': name, 'name': name} for name in Config.MARKET_TICKERS.keys()]
+        full_sort_list = market_sort_list + Config.FUND_WATCH_LIST
+
+        # === 渲染分頁 ===
         tab1, tab2, tab3 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測"])
 
         with tab1:
-            render_tab_overview(all_data)
+            # 傳入包含市場指標的排序清單
+            render_tab_overview(all_data, full_sort_list)
         
         with tab2:
             render_tab_chart(all_data, options_map)
