@@ -38,9 +38,9 @@ Gemini-Cathay-Fund-Tool/
 ├── README.md               # 專案說明文件
 │
 └── modules/                # 【核心模組】
-    ├── __init__.py         # Package 識別檔
+    ├── __init__.py
     ├── config.py           # 【配置層】基金清單、市場代號、全域常數設定
-    ├── scraper.py          # 【資料層】負責爬取國泰 API 與 Yahoo Finance 數據
+    ├── scraper.py          # 【資料層】負責爬取 API 與 Yahoo Finance 數據
     ├── analyzer.py         # 【邏輯層】負責指標計算、回測演算法
     └── visualizer.py       # 【表現層】負責 Excel 樣式生成與 Plotly 圖表繪製
 ```
@@ -85,16 +85,6 @@ Gemini-Cathay-Fund-Tool/
 4.  選擇您的 Repository 與 Branch (`main`)。
 5.  設定 Main file path 為 `app.py`。
 6.  點擊 **Deploy** 即可完成部署。
-
-## 📂 專案結構
-
-```text
-Gemini-Cathay-Fund-Tool/
-├── app.py              # 主程式 (整合 MarketScraper 與 FundScraper)
-├── requirements.txt    # Python 依賴清單 (新增 yfinance)
-├── README.md           # 專案說明文件
-└── .gitignore          # Git 忽略設定
-```
 
 ## ⚠️ 免責聲明 (Disclaimer)
 
