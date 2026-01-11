@@ -85,10 +85,27 @@ class FundAnalyzer:
         }
 
     @staticmethod
-    def analyze_all(data_map: Dict[str, pd.DataFrame]) -> pd.DataFrame:
+    def analyze_all(data_map: Dict[str, pd.DataFrame], sort_list: List[Dict] = None) -> pd.DataFrame:
+        """
+        分析所有資料。
+        sort_list: 若提供，則依照此清單中的 'id' 順序排列結果。
+        """
         summary_list = []
-        for df in data_map.values():
-            summary_list.append(FundAnalyzer.analyze_single(df))
+        processed_keys = set()
+        
+        # 1. 優先處理 sort_list 中的項目 (保持順序)
+        if sort_list:
+            for item in sort_list:
+                fid = item['id']
+                if fid in data_map:
+                    summary_list.append(FundAnalyzer.analyze_single(data_map[fid]))
+                    processed_keys.add(fid)
+        
+        # 2. 處理剩餘的項目 (例如市場指標或其他未在清單中的基金)
+        for key, df in data_map.items():
+            if key not in processed_keys:
+                summary_list.append(FundAnalyzer.analyze_single(df))
+                
         return pd.DataFrame(summary_list)
 
 class BacktestEngine:

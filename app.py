@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import pandas as pd
 import urllib3
@@ -51,6 +52,7 @@ def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
             target_markets = {name: Config.MARKET_TICKERS[name] for name in selected_markets}
 
         with st.expander("🏦 國泰基金清單", expanded=True):
+            # 預設值顯示 Config 中的 ID
             default_ids = ",\n".join(Config.DEFAULT_FUND_IDS_LIST)
             fund_input = st.text_area(
                 "基金代號 (每行一個)", 
@@ -64,7 +66,9 @@ def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
 
 def render_tab_overview(all_data: Dict[str, pd.DataFrame]):
     """渲染分頁 1：報表總覽"""
-    summary_df = FundAnalyzer.analyze_all(all_data)
+    # 這裡傳入 FUND_WATCH_LIST，讓 Analyzer 依照此順序產生報表
+    summary_df = FundAnalyzer.analyze_all(all_data, sort_list=Config.FUND_WATCH_LIST)
+    
     st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
     st.dataframe(summary_df)
 
@@ -82,7 +86,6 @@ def render_tab_chart(all_data: Dict[str, pd.DataFrame], options_map: Dict[str, s
     
     rf_rate_val = 4.0
     tnx_key = Config.MARKET_TICKERS.get("美國 10 年期公債殖利率")
-    
     tnx_data_key = "美國 10 年期公債殖利率"
     if tnx_data_key in all_data:
         tnx_df = all_data[tnx_data_key]
@@ -218,12 +221,36 @@ def main():
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
 
+        # === 核心修改：覆寫基金名稱與順序 ===
+        # 在生成選單和圖表之前，先更新 all_data 內的名稱
+        for item in Config.FUND_WATCH_LIST:
+            fid = item['id']
+            custom_name = item['name']
+            if fid in all_data:
+                # 覆寫 DataFrame 內的「基金名稱」欄位
+                all_data[fid]['基金名稱'] = custom_name
+        
+        # 建立選項對照表 (顯示名稱 -> 原始Key)
         options_map = {}
+        # 為了讓下拉選單也依照順序，我們先遍歷 Config 列表
+        processed_keys = set()
+        
+        # 1. 先加入 Config 清單中的項目
+        for item in Config.FUND_WATCH_LIST:
+            fid = item['id']
+            if fid in all_data:
+                fund_name = all_data[fid]['基金名稱'].iloc[0]
+                display_label = f"{fund_name} ({fid})"
+                options_map[display_label] = fid
+                processed_keys.add(fid)
+
+        # 2. 加入剩餘的項目 (如市場指標)
         for key, df in all_data.items():
-            if not df.empty:
-                fund_name = df['基金名稱'].iloc[0]
-                display_label = f"{fund_name} ({key})" if fund_name != key else key
-                options_map[display_label] = key
+            if key not in processed_keys:
+                if not df.empty:
+                    fund_name = df['基金名稱'].iloc[0]
+                    display_label = f"{fund_name} ({key})" if fund_name != key else key
+                    options_map[display_label] = key
 
         tab1, tab2, tab3 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測"])
 
