@@ -3,6 +3,7 @@
 這是一個基於 Python 與 Streamlit 開發的自動化金融分析儀表板。
 專為投資人設計，能夠即時整合 **全球關鍵市場指標 (Yahoo Finance)** 與 **指定國泰基金 (Cathay API)** 的歷史淨值數據，
 提供一站式的淨值追蹤、趨勢比較、風險分析與投資策略回測。
+
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Streamlit](https://img.shields.io/badge/Framework-Streamlit-red)
 ![Data Source](https://img.shields.io/badge/Data-Yahoo_Finance_%26_Cathay-green)
