@@ -1,40 +1,48 @@
 # 📊 全球市場與基金淨值戰情室 (Global Market & Fund Dashboard)
 
-這是一個全方位的金融數據分析工具，整合了 **國泰世華銀行基金** 與 **Yahoo Finance 全球市場數據**。
-本專案能協助投資人一站式監控基金淨值、比特幣、美股指數、原物料及關鍵經濟指標，並自動計算歷史極值與近一年波動，最終生成專業的 Excel 戰情報表。
-
+這是一個基於 Python 與 Streamlit 開發的自動化金融分析儀表板。
+專為投資人設計，能夠即時整合 **全球關鍵市場指標 (Yahoo Finance)** 與 **指定國泰基金 (Cathay API)** 的歷史淨值數據，
+提供一站式的淨值追蹤、趨勢比較、風險分析與投資策略回測。
 ![Python](https://img.shields.io/badge/Python-3.9%2B-blue)
 ![Streamlit](https://img.shields.io/badge/Framework-Streamlit-red)
 ![Data Source](https://img.shields.io/badge/Data-Yahoo_Finance_%26_Cathay-green)
 ![Status](https://img.shields.io/badge/Status-Active-success)
 
-## 🚀 功能特色
+## 🚀 主要功能 (Key Features)
 
-* **雙重數據引擎 (Hybrid Data Engine)**：
-    * **國泰基金**：自動爬取官方網站歷史淨值。
-    * **全球市場**：串接 Yahoo Finance API，支援加密貨幣、美股指數、債券殖利率、大宗商品等。
-* **精準歷史分析 (Historical Precision)**：
-    * 採用 `max` 週期抓取策略，確保「歷史最高/最低價」為 Yahoo Finance 的上市以來極值 (All-Time High/Low)。
-    * 自動計算近一年 (52週) 的價格波動區間。
-* **專業報表輸出 (Smart Reporting)**：
-    * 一鍵生成 `.xlsx` 報表。
-    * **智慧欄寬演算**：自動根據中英文內容長度調整 Excel 欄寬，閱讀不費力。
-    * **格式優化**：內建千分位、小數點對齊與超連結跳轉功能。
-* **高效能並發 (Concurrency)**：
-    * 採用 `ThreadPoolExecutor` 多執行緒技術，同時抓取數十檔標的，大幅縮短等待時間。
-* **現代化介面 (Modern UI)**：
-    * 側邊欄 (Sidebar) 整合設定面板，使用折疊選單 (Expander) 保持介面整潔。
+### 1. 📋 市場全覽與報表自動化 (Overview & Reporting)
+* **跨平台數據整合**：同時抓取美股 ETF (VOO, QQQ)、加密貨幣 (BTC)、原物料 (黃金, 原油)、總經指標 (VIX, 10年期公債殖利率) 與指定基金淨值。
+* **自動化摘要**：即時計算最新淨值、近一年高低點及其乖離率。
+* **Excel 報表輸出**：一鍵匯出包含完整格式與超連結的 Excel 分析報告 (`.xlsx`)。
 
-## 🌍 目前支援的市場指標
+### 2. 📈 進階趨勢與風險分析 (Advanced Charting & Risk Analysis)
+* **雙軸趨勢比較**：支援同時繪製兩種不同單位的資產（例如：台幣計價基金 vs. 美元指數），並自動進行起點歸一化 (Normalized) 比較。
+* **資產增值模擬**：模擬 100 萬本金在不同標的下的歷史資產增長曲線。
+* **風險指標計算**：自動計算所選區間的 **年化夏普值 (Sharpe Ratio)** 與 **年化波動度 (Volatility)**，並以無風險利率 (美國 10 年期公債) 為基準。
 
-除了自定義的國泰基金代號外，內建支援以下關鍵指標：
+### 3. 💰 投資策略回測引擎 (Backtesting Engine)
+* **單筆投入 (Lump Sum)**：計算在特定日期單筆買入後的持有報酬率與現值。
+* **定期定額 (DCA)**：模擬每月固定日期扣款的投資績效，包含總投入成本、累積單位數與最終報酬率。
+* **歷史績效速覽**：自動生成近 1 月至近 10 年的快速報酬率對照表。
 
-* **加密貨幣**: 比特幣 (BTC-USD)
-* **恐慌指數**: VIX 波動率指數
-* **總經指標**: 美國 10 年期公債殖利率、美元指數 (DXY)
-* **大宗商品**: 布蘭特原油、黃金期貨
-* **美股指數**: S&P 500、NASDAQ、羅素 2000、費城半導體
-* **亞洲指數**: 上證指數、香港國企指數
+---
+
+## 📂 專案架構 (Project Structure)
+
+```text
+Gemini-Cathay-Fund-Tool/
+│
+├── app.py                  # 【主程式】Streamlit 入口與 UI 邏輯控制
+├── requirements.txt        # 套件依賴清單
+├── README.md               # 專案說明文件
+│
+└── modules/                # 【核心模組】
+    ├── __init__.py         # Package 識別檔
+    ├── config.py           # 【配置層】基金清單、市場代號、全域常數設定
+    ├── scraper.py          # 【資料層】負責爬取國泰 API 與 Yahoo Finance 數據
+    ├── analyzer.py         # 【邏輯層】負責指標計算、回測演算法
+    └── visualizer.py       # 【表現層】負責 Excel 樣式生成與 Plotly 圖表繪製
+```
 
 ## 🛠️ 技術棧 (Tech Stack)
 
