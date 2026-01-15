@@ -46,7 +46,6 @@ class ExcelReport:
         header_fmt = workbook.add_format({'bold': True, 'font_name': base_font, 'bg_color': '#DCE6F1', 'align': 'center', 'valign': 'vcenter', 'border': 1})
         text_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1})
         num_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1, 'num_format': '#,##0.00'}) 
-        pct_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1, 'num_format': '0.00'}) # 百分比欄位
         link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1, 'font_name': base_font, 'valign': 'top', 'border': 1})
         date_fmt = workbook.add_format({'num_format': 'yyyy-mm-dd', 'font_name': base_font, 'valign': 'top', 'border': 1})
 
@@ -63,14 +62,17 @@ class ExcelReport:
 
             for j in range(1, len(display_df.columns)):
                 val = display_df.iat[i, j]
-                col_name = display_df.columns[j]
                 
                 if j in date_cols and pd.notna(val):
                     if isinstance(val, (str, datetime, pd.Timestamp)): val = pd.to_datetime(val)
                     worksheet.write_datetime(i+1, j, val, date_fmt)
                 elif isinstance(val, (int, float)):
-                    # 如果欄位名稱包含率或%，使用不同格式 (選擇性)
-                    worksheet.write_number(i+1, j, val, num_fmt)
+                    # === 修正重點：檢查是否為 NaN ===
+                    # 雖然 NaN 也是 float，但 xlsxwriter write_number 不支援，必須改寫為文字 "-"
+                    if pd.isna(val):
+                        worksheet.write(i+1, j, "-", text_fmt)
+                    else:
+                        worksheet.write_number(i+1, j, val, num_fmt)
                 else:
                     worksheet.write(i+1, j, str(val) if pd.notna(val) else "-", text_fmt)
 
@@ -100,7 +102,7 @@ class ExcelReport:
             worksheet.set_column(i, i, width)
 
 class ChartManager:
-    # ... (Plotly 繪圖部分保持不變) ...
+    # ... (Plotly 繪圖部分與之前相同，保持不變) ...
     @staticmethod
     def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
         if not selected_keys:
