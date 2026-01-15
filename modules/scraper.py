@@ -41,7 +41,7 @@ class FundScraper:
 
     def fetch_dividend(self, fund_id: str) -> Optional[pd.DataFrame]:
         """【新增】抓取配息紀錄"""
-        # tab6 代表配息紀錄表位置
+        # 這是您提供的新網址結構
         target_url = f"https://www.cathaybk.com.tw/cathaybk/personal/investment/fund/details/?fundid={fund_id}#tab6"
         
         try:
@@ -63,7 +63,7 @@ class FundScraper:
             return None
 
     def _parse_dividend_html(self, html_str: str) -> pd.DataFrame:
-        """解析配息 HTML"""
+        """解析配息 HTML (使用 v2 邏輯 + 數值清洗)"""
         soup = BeautifulSoup(html_str, 'html.parser')
         
         # 1. 鎖定標題
