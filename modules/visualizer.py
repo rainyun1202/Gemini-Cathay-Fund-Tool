@@ -156,6 +156,19 @@ class ExcelReport:
             )
             width = min(max(max_len * 0.9, 10), 50)
             worksheet.set_column(i, i, width)
+            
+    @staticmethod
+    def create_single_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
+        """【新增】生成單一 DataFrame 的 Excel 報表 (適用於成分股下載)"""
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            df.to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=1)
+            worksheet = writer.sheets[sheet_name]
+            # 沿用明細表的簡易綠色標題樣式
+            ExcelReport._apply_styles_simple(workbook, worksheet, df)
+            ExcelReport._set_columns_width(df, worksheet)
+        return output.getvalue()
 
 class ChartManager:
     # ... (ChartManager 內容保持不變，直接沿用即可) ...

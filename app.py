@@ -25,21 +25,20 @@ st.set_page_config(page_title="全球市場與基金分析", layout="wide")
 # ==========================================
 
 @st.cache_data(ttl=3600, show_spinner="正在自網路下載最新數據...")
-def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Tuple[Dict, Dict]:
+def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Tuple[Dict, Dict, Dict]:
     """
     快取資料載入函式
-    Return: (nav_data_map, dividend_data_map)
+    Return: (nav_data_map, dividend_data_map, holdings_data_map)
     """
     nav_data = {}
     div_data = {}
+    hold_data = {}
     
-    # 1. 下載市場數據 (只有淨值)
     if target_markets:
         market_scraper = MarketScraper()
         market_data = market_scraper.fetch_all(target_markets)
         nav_data.update(market_data)
         
-    # 2. 下載基金數據 (淨值 + 配息)
     if fund_ids:
         fund_scraper = FundScraper()
         
@@ -47,11 +46,15 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         fund_navs = fund_scraper.fetch_all_nav(fund_ids)
         nav_data.update(fund_navs)
         
-        # B. 抓配息 (新增)
+        # B. 抓配息
         fund_divs = fund_scraper.fetch_all_dividend(fund_ids)
         div_data.update(fund_divs)
         
-    return nav_data, div_data
+        # C. 抓取成分股 (新增)
+        fund_holds = fund_scraper.fetch_all_holdings(fund_ids)
+        hold_data.update(fund_holds)
+        
+    return nav_data, div_data, hold_data
 
 def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
     with st.sidebar:
@@ -66,18 +69,13 @@ def render_sidebar() -> Tuple[Dict[str, str], List[str]]:
     return target_markets, fund_ids
 
 def render_tab_overview(nav_data: Dict, div_data: Dict, full_sort_list: List[Dict]):
-    """渲染分頁 1：報表總覽"""
-    # 傳入配息 Map
     summary_df = FundAnalyzer.analyze_all(nav_data, div_data, sort_list=full_sort_list)
-    
     st.success(f"✅ 完成！共分析 {len(summary_df)} 筆標的")
     st.dataframe(summary_df)
 
-    # 準備完整的配息明細表，以便寫入 Excel Sheet 2
     all_div_list = []
     for fid, df in div_data.items():
         if fid in nav_data:
-            # 補上基金名稱方便閱讀
             name = nav_data[fid]['基金名稱'].iloc[0]
             df = df.copy()
             df.insert(0, '基金名稱', name)
@@ -177,6 +175,41 @@ def render_tab_backtest(all_data: Dict[str, pd.DataFrame], options_map: Dict[str
                 st.markdown(f"""<div style='background-color:#f0f2f6; padding:15px; border-radius:10px'><h4 style='margin-top:0'>📊 定期定額結果</h4><ul><li><b>回測期間</b>: {res['start_date']} ~ {res['end_date']}</li><li><b>總扣款次數</b>: {res['deduct_count']} 次</li><li><b>總投入本金</b>: {res['total_invested']:,} 元</li><li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li><li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li></ul></div>""", unsafe_allow_html=True)
                 with st.expander("查看詳細扣款紀錄"): st.dataframe(res['records'], hide_index=True)
 
+# === 新增：成分股顯示分頁 ===
+def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
+    st.subheader("🔍 基金主要10大成分股")
+    
+    # 篩選出只有基金的選項 (排除市場大盤指標，因為大盤沒有從國泰抓成分股)
+    valid_options = {k: v for k, v in options_map.items() if v in hold_data}
+    
+    if not valid_options:
+        st.warning("目前選擇的標的無成分股資料可供檢視。")
+        return
+
+    # 選擇要查看的基金
+    current_target = st.selectbox("請選擇要查看的基金:", list(valid_options.keys()), key="holdings_select")
+    target_key = valid_options[current_target]
+    
+    fund_hold_info = hold_data.get(target_key)
+    if not fund_hold_info or fund_hold_info.get("data").empty:
+        st.info("此基金目前無成分股資料。")
+        return
+    
+    date_str = fund_hold_info.get("date", "未知")
+    df_hold = fund_hold_info.get("data")
+    
+    st.markdown(f"#### {current_target}")
+    st.caption(f"📅 資料發布日期: **{date_str}**")
+    
+    # 顯示表格
+    st.dataframe(df_hold, hide_index=True)
+    
+    # 提供單獨下載的 Excel
+    excel_data = ExcelReport.create_single_excel_bytes(df_hold, sheet_name="成分股")
+    file_name = f"{target_key}_Holdings_{datetime.now().strftime('%Y%m%d')}.xlsx"
+    st.download_button("📥 下載此成分股 (Excel)", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
     st.markdown("整合 **國泰基金** 與 **全球關鍵市場指標** 的自動化分析工具。")
@@ -184,8 +217,9 @@ def main():
     if st.button("🚀 開始/更新 分析", type="primary"):
         st.session_state['has_run'] = True
     if st.session_state.get('has_run'):
-        # 載入 Nav 和 Div 兩種資料
-        nav_data, div_data = load_data_with_cache(target_markets, fund_ids)
+        
+        # 接收三種資料 (淨值、配息、成分股)
+        nav_data, div_data, hold_data = load_data_with_cache(target_markets, fund_ids)
         if not nav_data:
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
@@ -220,13 +254,17 @@ def main():
         market_sort_list = [{'id': name, 'name': name} for name in Config.MARKET_TICKERS.keys()]
         full_sort_list = market_sort_list + Config.FUND_WATCH_LIST
 
-        tab1, tab2, tab3 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測"])
+        # === 修改：新增第四個分頁 ===
+        tab1, tab2, tab3, tab4 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測", "🔍 10大成分股"])
+        
         with tab1:
             render_tab_overview(nav_data, div_data, full_sort_list)
         with tab2:
             render_tab_chart(nav_data, options_map)
         with tab3:
             render_tab_backtest(nav_data, options_map)
+        with tab4:
+            render_tab_holdings(hold_data, options_map)
 
 if __name__ == "__main__":
     main()
