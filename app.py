@@ -5,6 +5,7 @@ import urllib3
 import logging
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 
 # === 匯入自定義模組 ===
@@ -50,7 +51,7 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         fund_divs = fund_scraper.fetch_all_dividend(fund_ids)
         div_data.update(fund_divs)
         
-        # C. 抓取成分股 (新增)
+        # C. 抓取成分股
         fund_holds = fund_scraper.fetch_all_holdings(fund_ids)
         hold_data.update(fund_holds)
         
@@ -175,7 +176,9 @@ def render_tab_backtest(all_data: Dict[str, pd.DataFrame], options_map: Dict[str
                 st.markdown(f"""<div style='background-color:#f0f2f6; padding:15px; border-radius:10px'><h4 style='margin-top:0'>📊 定期定額結果</h4><ul><li><b>回測期間</b>: {res['start_date']} ~ {res['end_date']}</li><li><b>總扣款次數</b>: {res['deduct_count']} 次</li><li><b>總投入本金</b>: {res['total_invested']:,} 元</li><li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li><li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li></ul></div>""", unsafe_allow_html=True)
                 with st.expander("查看詳細扣款紀錄"): st.dataframe(res['records'], hide_index=True)
 
-# === 新增：成分股顯示分頁 ===
+# ==========================================
+# 新增：第四分頁 (成分股與即時報價分析)
+# ==========================================
 def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
     st.subheader("🔍 基金主要10大成分股")
     
@@ -201,21 +204,74 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
     st.markdown(f"#### {current_target}")
     st.caption(f"📅 資料發布日期: **{date_str}**")
     
-    # 顯示表格
+    # 顯示原始表格
     st.dataframe(df_hold, hide_index=True)
     
     # 提供單獨下載的 Excel
     excel_data = ExcelReport.create_single_excel_bytes(df_hold, sheet_name="成分股")
     file_name = f"{target_key}_Holdings_{datetime.now().strftime('%Y%m%d')}.xlsx"
-    st.download_button("📥 下載此成分股 (Excel)", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("📥 下載原始成分股表 (Excel)", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
+    # =========================================
+    # ⚡ 延遲載入：按鈕觸發即時成分股狀態分析
+    # =========================================
+    st.markdown("---")
+    st.markdown("#### ⚡ 即時成分股技術狀態分析")
+    st.info("💡 系統將自動清洗不規則名稱，並透過 Yahoo Finance 模糊搜尋對應的 Ticker，計算近一年高點與回撤。")
+    
+    if st.button("🚀 載入成分股即時報價", type="primary"):
+        with st.spinner("正在透過 Yahoo Finance 模糊搜尋並獲取報價... 大約需要 3~5 秒鐘。"):
+            # 尋找包含名稱的欄位 (通常第一欄，或名稱包含'名稱'、'標的')
+            name_col = df_hold.columns[0]
+            for col in df_hold.columns:
+                if any(kw in str(col) for kw in ['名稱', '標的', '股票', '成分']):
+                    name_col = col
+                    break
+            
+            companies = df_hold[name_col].tolist()
+            market_scraper = MarketScraper()
+            results = []
+            
+            # 使用多執行緒平行查詢 10 檔股票，極大化速度
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                futures = {executor.submit(market_scraper.fetch_stock_stats, comp): comp for comp in companies}
+                for future in as_completed(futures):
+                    comp = futures[future]
+                    try:
+                        stats = future.result()
+                        stats['成分股名稱'] = comp
+                        results.append(stats)
+                    except Exception:
+                        results.append({"成分股名稱": comp, "Ticker": "解析失敗", "最新價格": None, "近一年最高": None, "高點0.618": None, "距高點回撤(%)": None})
+            
+            # 整理為 DataFrame 並確保順序與原表一致
+            df_stats = pd.DataFrame(results)
+            df_stats = df_stats.set_index('成分股名稱').reindex(companies).reset_index()
+            
+            # 調整欄位順序，把名稱和 Ticker 放在前面
+            cols = ['成分股名稱', 'Ticker', '最新價格', '近一年最高', '高點0.618', '距高點回撤(%)']
+            df_stats = df_stats[cols]
+            
+            # 顯示顏色漸層標註的資料表 (回撤越深顏色越紅，越少越綠)
+            st.dataframe(
+                df_stats.style.format({
+                    "最新價格": "{:,.2f}",
+                    "近一年最高": "{:,.2f}",
+                    "高點0.618": "{:,.2f}",
+                    "距高點回撤(%)": "{:,.2f}%"
+                }).background_gradient(subset=["距高點回撤(%)"], cmap="RdYlGn", vmin=-50, vmax=0),
+                hide_index=True
+            )
 
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
     st.markdown("整合 **國泰基金** 與 **全球關鍵市場指標** 的自動化分析工具。")
+    
     target_markets, fund_ids = render_sidebar()
+    
     if st.button("🚀 開始/更新 分析", type="primary"):
         st.session_state['has_run'] = True
+        
     if st.session_state.get('has_run'):
         
         # 接收三種資料 (淨值、配息、成分股)
@@ -254,7 +310,7 @@ def main():
         market_sort_list = [{'id': name, 'name': name} for name in Config.MARKET_TICKERS.keys()]
         full_sort_list = market_sort_list + Config.FUND_WATCH_LIST
 
-        # === 修改：新增第四個分頁 ===
+        # === 四個分頁 ===
         tab1, tab2, tab3, tab4 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測", "🔍 10大成分股"])
         
         with tab1:
