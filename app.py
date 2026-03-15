@@ -248,18 +248,23 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
             df_stats = pd.DataFrame(results)
             df_stats = df_stats.set_index('成分股名稱').reindex(companies).reset_index()
             
-            # 調整欄位順序，把名稱和 Ticker 放在前面
+            # 調整欄位順序
             cols = ['成分股名稱', 'Ticker', '最新價格', '近一年最高', '高點0.618', '距高點回撤(%)']
             df_stats = df_stats[cols]
             
-            # 顯示顏色漸層標註的資料表 (回撤越深顏色越紅，越少越綠)
+            # === 新增：防呆機制，將數值欄位強制轉為浮點數，無法轉換的變成 NaN ===
+            numeric_cols = ['最新價格', '近一年最高', '高點0.618', '距高點回撤(%)']
+            for c in numeric_cols:
+                df_stats[c] = pd.to_numeric(df_stats[c], errors='coerce')
+            
+            # 顯示顏色漸層標註的資料表 (加入 na_rep="-" 遇到空值顯示 -)
             st.dataframe(
                 df_stats.style.format({
                     "最新價格": "{:,.2f}",
                     "近一年最高": "{:,.2f}",
                     "高點0.618": "{:,.2f}",
                     "距高點回撤(%)": "{:,.2f}%"
-                }).background_gradient(subset=["距高點回撤(%)"], cmap="RdYlGn", vmin=-50, vmax=0),
+                }, na_rep="-").background_gradient(subset=["距高點回撤(%)"], cmap="RdYlGn", vmin=-50, vmax=0),
                 hide_index=True
             )
 
