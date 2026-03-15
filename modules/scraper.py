@@ -118,7 +118,7 @@ class FundScraper:
                 date_text = raw_date_text
 
         # 2. 鎖定標題 "主要10大成分股" (或包含此字眼的標籤)
-        target_header = soup.find('h3', string=lambda text: text and ('主要10大成分股' in text or '主要成分股' in text))
+        target_header = soup.find('h3', string=lambda text: text and ('主要10大成分股' in text or '主要持股' in text))
         if not target_header: return {"date": date_text, "data": pd.DataFrame()}
 
         # 3. 找表格容器
