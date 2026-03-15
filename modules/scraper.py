@@ -215,26 +215,76 @@ class MarketScraper:
             if df is not None: results[name] = df
         return results
 
-    # === 新增：模糊搜尋與成分股數據抓取 ===
+    # ==========================================
+    # ⚡ 智慧解析引擎：處理不規則成分股名稱
+    # ==========================================
+    @staticmethod
+    def clean_company_name(name: str) -> str:
+        """清洗髒資料，移除產業別與註解"""
+        name = str(name).strip()
+        # 1. 切除逗號後面的純中文 (如 "Alphabet, Inc.,通訊服務" -> "Alphabet, Inc.")
+        name = re.sub(r',[^\x00-\x7F]+$', '', name)
+        # 2. 切除全形逗號後面的內容 (如 "台積電，半導體")
+        name = re.sub(r'，.*$', '', name)
+        # 3. 切除括號內容 (如 "巴里克黃金(加拿大 原物料)" -> "巴里克黃金")
+        name = re.sub(r'\(.*?\)|（.*?）', '', name)
+        # 4. 移除常見中文公司後綴干擾
+        name = re.sub(r'股份|有限公司|公司|控股|集團', '', name).strip()
+        return name
+
     @staticmethod
     def search_symbol(company_name: str) -> Optional[str]:
-        """利用 Yahoo Finance 搜尋 API 將凌亂的公司名稱轉為 Ticker"""
-        # 清洗名稱 1：如果字串包含逗號，且最後一個逗號後面全是中文(如產業別)，就切掉
-        # e.g., "Alphabet, Inc.,通訊服務" -> "Alphabet, Inc."
-        clean_name = re.sub(r',[^\x00-\x7F]+$', '', str(company_name))
-        # 清洗名稱 2：移除常見公司後綴與干擾詞
-        clean_name = re.sub(r'股份|有限公司|公司|控股|集團', '', clean_name).strip()
+        """利用多階段清洗與搜尋引擎 API 解析 Ticker"""
+        original_name = str(company_name).strip()
         
-        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={requests.utils.quote(clean_name)}&quotesCount=1"
-        headers = {"User-Agent": "Mozilla/5.0"}
+        # [階段 0]：優先看 Config 是否有強制指定的字典 (安全網)
+        if hasattr(Config, 'CUSTOM_TICKER_MAP'):
+            for key_name, ticker in Config.CUSTOM_TICKER_MAP.items():
+                if key_name in original_name:
+                    return ticker
+
+        # [階段 1]：字串清洗
+        clean_name = MarketScraper.clean_company_name(original_name)
+        if not clean_name:
+            return None
+
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+        # [階段 2]：Yahoo Finance 官方 Search API (最快，適合英文或標準中文)
+        search_candidates = [clean_name]
+        
+        # 嘗試抽出純英文部分 (如 "巴里克黃金 BARRICK" -> 抽出 "BARRICK")
+        eng_parts = re.findall(r'[A-Za-z\.\-\& ]+', original_name)
+        if eng_parts:
+            longest_eng = max(eng_parts, key=len).strip()
+            if len(longest_eng) > 3:
+                search_candidates.append(longest_eng)
+
+        for candidate in search_candidates:
+            if not candidate: continue
+            url = f"https://query2.finance.yahoo.com/v1/finance/search?q={requests.utils.quote(candidate)}&quotesCount=1"
+            try:
+                res = requests.get(url, headers=headers, timeout=5)
+                data = res.json()
+                quotes = data.get('quotes', [])
+                if quotes and 'symbol' in quotes[0]:
+                    return quotes[0]['symbol']
+            except Exception:
+                pass
+
+        # [階段 3]：搜尋引擎 Web 爬蟲 (最強模糊比對，解決「越南外貿銀行」這類難題)
+        # 使用 DuckDuckGo Lite 版，免 API Key 且不怕被擋
+        query = f'"{clean_name}" stock quote site:finance.yahoo.com/quote'
+        ddg_url = "https://lite.duckduckgo.com/lite/"
         try:
-            res = requests.get(url, headers=headers, timeout=5)
-            data = res.json()
-            quotes = data.get('quotes', [])
-            if quotes:
-                return quotes[0]['symbol']
-        except Exception:
-            pass
+            res = requests.post(ddg_url, headers=headers, data={"q": query}, timeout=5)
+            # 從搜尋結果的 HTML 文本中，直接找出 Yahoo Finance 的網址特徵
+            match = re.search(r'finance\.yahoo\.com/quote/([A-Za-z0-9\.\-\=]+)', res.text)
+            if match:
+                return match.group(1)
+        except Exception as e:
+            logger.debug(f"Search Engine Error for {clean_name}: {e}")
+
         return None
 
     def fetch_stock_stats(self, company_name: str) -> Dict[str, Any]:
