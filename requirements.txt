@@ -5,3 +5,4 @@ xlsxwriter
 urllib3
 yfinance
 plotly
+matplotlib
