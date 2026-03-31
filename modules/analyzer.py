@@ -211,12 +211,13 @@ class BacktestEngine:
             results.append({ "週期": name, "單筆報酬率 (%)": f"{roi_lump:.2f}" if roi_lump is not None else "-", "定期定額報酬率 (%)": f"{roi_dca:.2f}" if roi_dca is not None else "-" })
         return pd.DataFrame(results)
 
-    @staticmethod
-    def calculate_ma_strategy(df: pd.DataFrame, ma_window: int = 20):
+@staticmethod
+    def calculate_ma_strategy(df: pd.DataFrame, ma_window: int = 20, confirm_days: int = 3, cooldown_days: int = 20):
         """
-        簡易均線策略回測：
-        - 策略：當 淨值 > 20MA 時持有；當 淨值 <= 20MA 時空手（現金）。
-        - 目的：規避大幅度回檔。
+        實務型均線策略回測 (加入確認機制與冷卻期)：
+        - 策略：連續 `confirm_days` 天淨值大於 MA 且不在冷卻期內，則進場 (Buy)。
+                連續 `confirm_days` 天淨值小於 MA 且不在冷卻期內，則出場 (Sell)。
+        - 冷卻期：每次進出場後，限制 `cooldown_days` 天內不得再次交易，避免盤整期頻繁雙巴。
         """
         df = df.sort_values('日期').copy()
         df['日期'] = pd.to_datetime(df['日期'])
@@ -224,40 +225,52 @@ class BacktestEngine:
         # 1. 計算移動平均線
         df['MA'] = df['NAV'].rolling(window=ma_window).mean()
         
-        # 2. 產生訊號：1 為持有 (Long), 0 為空手 (Cash)
-        # 我們用前一天的訊號來決定今天的持有狀況，避免預知未來
-        df['Signal'] = np.where(df['NAV'] > df['MA'], 1, 0)
-        df['Position'] = df['Signal'].shift(1).fillna(0)
+        # 判斷每日是否在 MA 之上
+        df['Above_MA'] = (df['NAV'] > df['MA']).astype(int)
+        
+        # 計算連續天數 (使用 rolling sum)
+        # 如果最近 3 天的 Above_MA 加總等於 3，代表連續 3 天大於 MA
+        # 如果加總等於 0，代表連續 3 天小於 MA
+        df['Above_Sum'] = df['Above_MA'].rolling(window=confirm_days).sum()
+        
+        # 2. 狀態機：產生交易訊號與部位
+        positions = []
+        current_position = 0 # 0=空手, 1=持有
+        cooldown = 0
+        
+        for i in range(len(df)):
+            # 如果均線或確認天數還算不出來，保持空手
+            if pd.isna(df['MA'].iloc[i]) or pd.isna(df['Above_Sum'].iloc[i]):
+                positions.append(0)
+                continue
+                
+            if cooldown > 0:
+                cooldown -= 1 # 冷卻期倒數
+            else:
+                # 檢查訊號 (不在冷卻期內才會執行)
+                if df['Above_Sum'].iloc[i] == confirm_days and current_position == 0:
+                    current_position = 1  # 買進 (進場)
+                    cooldown = cooldown_days
+                elif df['Above_Sum'].iloc[i] == 0 and current_position == 1:
+                    current_position = 0  # 賣出 (出場)
+                    cooldown = cooldown_days
+                    
+            positions.append(current_position)
+            
+        # 紀錄「今天收盤後的決策部位」
+        df['Target_Position'] = positions
+        
+        # 實務操作：今天的決策，明天才能享受到報酬 (Shift 1)
+        df['Position'] = df['Target_Position'].shift(1).fillna(0)
         
         # 3. 計算報酬率
         df['Daily_Return'] = df['NAV'].pct_change()
-        # 策略報酬：持有時獲得日報酬，空手時報酬為 0
         df['Strategy_Return'] = df['Daily_Return'] * df['Position']
         
-        # 4. 計算累積報酬率 (累乘)
+        # 4. 全域累積報酬率
         df['Cum_Buy_Hold'] = (1 + df['Daily_Return']).cumprod()
         df['Cum_Strategy'] = (1 + df['Strategy_Return']).cumprod()
         
-        # 5. 計算指標
-        final_bh = (df['Cum_Buy_Hold'].iloc[-1] - 1) * 100
-        final_str = (df['Cum_Strategy'].iloc[-1] - 1) * 100
-        
-        # 計算最大回撤 (MDD)
-        def get_mdd(cum_returns):
-            peak = cum_returns.expanding(min_periods=1).max()
-            dd = (cum_returns - peak) / peak
-            return dd.min() * 100
-
-        mdd_bh = get_mdd(df['Cum_Buy_Hold'])
-        mdd_str = get_mdd(df['Cum_Strategy'])
-
         return {
-            "df": df.dropna(subset=['MA']), # 回傳包含 MA 的完整表格
-            "stats": {
-                "買入持有總報酬 (%)": final_bh,
-                "均線策略總報酬 (%)": final_str,
-                "買入持有 MDD (%)": mdd_bh,
-                "均線策略 MDD (%)": mdd_str,
-                "策略勝出": final_str > final_bh
-            }
+            "df": df.dropna(subset=['MA']) # 回傳包含完整計算的表格
         }

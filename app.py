@@ -335,6 +335,10 @@ def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
         mdd_bh = get_mdd(df_period['Cum_Buy_Hold'])
         mdd_str = get_mdd(df_period['Cum_Strategy'])
 
+        # === 新增：計算該區間內的實際交易次數 ===
+        # Target_Position 發生變化 (0變1 或 1變0) 即代表一次交易動作
+        trade_count_period = (df_period['Target_Position'].diff().fillna(0) != 0).sum()
+
         # ====================================================
         # 4. 顯示成效指標與圖表
         # ====================================================
@@ -342,7 +346,8 @@ def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
         st.markdown("#### 📊 區間策略成效對比")
         st.caption(f"分析期間：**{start_ts.strftime('%Y-%m-%d')}** 至 **{end_ts.strftime('%Y-%m-%d')}**")
         
-        col1, col2, col3, col4 = st.columns(4)
+        # 改為 5 個 Column 來容納交易次數
+        col1, col2, col3, col4, col5 = st.columns(5)
         with col1:
             st.metric("策略期間報酬", f"{final_str:.2f}%", 
                       delta=f"{final_str - final_bh:.2f}% (vs B&H)")
@@ -352,6 +357,8 @@ def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
             st.metric("策略最大回撤 (MDD)", f"{mdd_str:.2f}%")
         with col4:
             st.metric("買入持有 MDD", f"{mdd_bh:.2f}%")
+        with col5:
+            st.metric("區間進出次數", f"{trade_count_period} 次", help="買進或賣出皆算一次動作")
 
         ChartManager.plot_nav_with_ma(df_period, current_target)
         ChartManager.plot_strategy_comparison(df_period)
