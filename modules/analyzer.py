@@ -211,7 +211,7 @@ class BacktestEngine:
             results.append({ "週期": name, "單筆報酬率 (%)": f"{roi_lump:.2f}" if roi_lump is not None else "-", "定期定額報酬率 (%)": f"{roi_dca:.2f}" if roi_dca is not None else "-" })
         return pd.DataFrame(results)
 
-@staticmethod
+    @staticmethod
     def calculate_ma_strategy(df: pd.DataFrame, ma_window: int = 20, confirm_days: int = 3, cooldown_days: int = 20):
         """
         實務型均線策略回測 (加入確認機制與冷卻期)：
