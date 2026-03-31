@@ -210,3 +210,54 @@ class BacktestEngine:
             roi_dca = res_dca['roi'] if not err_dca else None
             results.append({ "週期": name, "單筆報酬率 (%)": f"{roi_lump:.2f}" if roi_lump is not None else "-", "定期定額報酬率 (%)": f"{roi_dca:.2f}" if roi_dca is not None else "-" })
         return pd.DataFrame(results)
+
+    @staticmethod
+    def calculate_ma_strategy(df: pd.DataFrame, ma_window: int = 20):
+        """
+        簡易均線策略回測：
+        - 策略：當 淨值 > 20MA 時持有；當 淨值 <= 20MA 時空手（現金）。
+        - 目的：規避大幅度回檔。
+        """
+        df = df.sort_values('日期').copy()
+        df['日期'] = pd.to_datetime(df['日期'])
+        
+        # 1. 計算移動平均線
+        df['MA'] = df['NAV'].rolling(window=ma_window).mean()
+        
+        # 2. 產生訊號：1 為持有 (Long), 0 為空手 (Cash)
+        # 我們用前一天的訊號來決定今天的持有狀況，避免預知未來
+        df['Signal'] = np.where(df['NAV'] > df['MA'], 1, 0)
+        df['Position'] = df['Signal'].shift(1).fillna(0)
+        
+        # 3. 計算報酬率
+        df['Daily_Return'] = df['NAV'].pct_change()
+        # 策略報酬：持有時獲得日報酬，空手時報酬為 0
+        df['Strategy_Return'] = df['Daily_Return'] * df['Position']
+        
+        # 4. 計算累積報酬率 (累乘)
+        df['Cum_Buy_Hold'] = (1 + df['Daily_Return']).cumprod()
+        df['Cum_Strategy'] = (1 + df['Strategy_Return']).cumprod()
+        
+        # 5. 計算指標
+        final_bh = (df['Cum_Buy_Hold'].iloc[-1] - 1) * 100
+        final_str = (df['Cum_Strategy'].iloc[-1] - 1) * 100
+        
+        # 計算最大回撤 (MDD)
+        def get_mdd(cum_returns):
+            peak = cum_returns.expanding(min_periods=1).max()
+            dd = (cum_returns - peak) / peak
+            return dd.min() * 100
+
+        mdd_bh = get_mdd(df['Cum_Buy_Hold'])
+        mdd_str = get_mdd(df['Cum_Strategy'])
+
+        return {
+            "df": df.dropna(subset=['MA']), # 回傳包含 MA 的完整表格
+            "stats": {
+                "買入持有總報酬 (%)": final_bh,
+                "均線策略總報酬 (%)": final_str,
+                "買入持有 MDD (%)": mdd_bh,
+                "均線策略 MDD (%)": mdd_str,
+                "策略勝出": final_str > final_bh
+            }
+        }

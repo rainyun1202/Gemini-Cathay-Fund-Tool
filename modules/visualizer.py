@@ -171,7 +171,7 @@ class ExcelReport:
         return output.getvalue()
 
 class ChartManager:
-    # ... (ChartManager 內容保持不變，直接沿用即可) ...
+
     @staticmethod
     def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
         if not selected_keys:
@@ -251,4 +251,54 @@ class ChartManager:
         for item in plot_data:
             fig.add_trace(go.Scatter(x=item["data"]['日期'], y=item["data"]['Growth'], name=item["name"], hovertemplate='%{y:,.0f}'))
         fig.update_layout(title=f'100 萬資產增值模擬 ({time_range_key})', xaxis=dict(title='日期'), yaxis=dict(title='資產總值 (TWD/USD 依標的計價)', tickformat=',.0f', range=y_range), hovermode='x unified', legend=dict(orientation="h", y=1.1))
+        st.plotly_chart(fig, use_container_width=True)
+
+    @staticmethod
+    def plot_nav_with_ma(strategy_df: pd.DataFrame, fund_name: str):
+        """繪製淨值與 20MA 的對照圖"""
+        fig = go.Figure()
+
+        # 淨值線
+        fig.add_trace(go.Scatter(
+            x=strategy_df['日期'], y=strategy_df['NAV'],
+            name='歷史淨值', line=dict(color='#1f77b4', width=2)
+        ))
+
+        # 20MA 線
+        fig.add_trace(go.Scatter(
+            x=strategy_df['日期'], y=strategy_df['MA'],
+            name='20日均線 (月線)', line=dict(color='#ff7f0e', width=1.5, dash='dot')
+        ))
+
+        fig.update_layout(
+            title=f"{fund_name} - 淨值與 20MA 走勢圖 (全歷史)",
+            xaxis_title="日期",
+            yaxis_title="淨值",
+            hovermode="x unified",
+            legend=dict(orientation="h", y=1.1)
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    @staticmethod
+    def plot_strategy_comparison(strategy_df: pd.DataFrame):
+        """繪製策略累積報酬率對照圖"""
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=strategy_df['日期'], y=strategy_df['Cum_Buy_Hold'],
+            name='買入持有 (Buy & Hold)', line=dict(color='gray', width=1.5)
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=strategy_df['日期'], y=strategy_df['Cum_Strategy'],
+            name='20MA 避險策略', line=dict(color='#2ca02c', width=2.5)
+        ))
+
+        fig.update_layout(
+            title="累積報酬率對照圖 (起始資產為 1.0)",
+            xaxis_title="日期",
+            yaxis_title="資產價值",
+            hovermode="x unified",
+            legend=dict(orientation="h", y=1.1)
+        )
         st.plotly_chart(fig, use_container_width=True)

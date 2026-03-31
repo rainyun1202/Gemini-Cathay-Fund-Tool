@@ -176,20 +176,14 @@ def render_tab_backtest(all_data: Dict[str, pd.DataFrame], options_map: Dict[str
                 st.markdown(f"""<div style='background-color:#f0f2f6; padding:15px; border-radius:10px'><h4 style='margin-top:0'>📊 定期定額結果</h4><ul><li><b>回測期間</b>: {res['start_date']} ~ {res['end_date']}</li><li><b>總扣款次數</b>: {res['deduct_count']} 次</li><li><b>總投入本金</b>: {res['total_invested']:,} 元</li><li><b>目前總市值</b>: <b>{res['final_value']:,.0f}</b> 元</li><li><b>投資報酬率</b>: <span style='color:{color};font-size:1.4em'><b>{res['roi']:.2f}%</b></span></li></ul></div>""", unsafe_allow_html=True)
                 with st.expander("查看詳細扣款紀錄"): st.dataframe(res['records'], hide_index=True)
 
-# ==========================================
-# 新增：第四分頁 (成分股與即時報價分析)
-# ==========================================
 def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
     st.subheader("🔍 基金主要10大成分股")
     
-    # 篩選出只有基金的選項 (排除市場大盤指標，因為大盤沒有從國泰抓成分股)
     valid_options = {k: v for k, v in options_map.items() if v in hold_data}
-    
     if not valid_options:
         st.warning("目前選擇的標的無成分股資料可供檢視。")
         return
 
-    # 選擇要查看的基金
     current_target = st.selectbox("請選擇要查看的基金:", list(valid_options.keys()), key="holdings_select")
     target_key = valid_options[current_target]
     
@@ -204,24 +198,18 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
     st.markdown(f"#### {current_target}")
     st.caption(f"📅 資料發布日期: **{date_str}**")
     
-    # 顯示原始表格
     st.dataframe(df_hold, hide_index=True)
     
-    # 提供單獨下載的 Excel
     excel_data = ExcelReport.create_single_excel_bytes(df_hold, sheet_name="成分股")
     file_name = f"{target_key}_Holdings_{datetime.now().strftime('%Y%m%d')}.xlsx"
     st.download_button("📥 下載原始成分股表 (Excel)", excel_data, file_name, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
-    # =========================================
-    # ⚡ 延遲載入：按鈕觸發即時成分股狀態分析
-    # =========================================
     st.markdown("---")
     st.markdown("#### ⚡ 即時成分股技術狀態分析")
     st.info("💡 系統將自動清洗不規則名稱，並透過 Yahoo Finance 模糊搜尋對應的 Ticker，計算近一年高點與回撤。")
     
     if st.button("🚀 載入成分股即時報價", type="primary"):
         with st.spinner("正在透過 Yahoo Finance 模糊搜尋並獲取報價... 大約需要 3~5 秒鐘。"):
-            # 尋找包含名稱的欄位 (通常第一欄，或名稱包含'名稱'、'標的')
             name_col = df_hold.columns[0]
             for col in df_hold.columns:
                 if any(kw in str(col) for kw in ['名稱', '標的', '股票', '成分']):
@@ -232,7 +220,6 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
             market_scraper = MarketScraper()
             results = []
             
-            # 使用多執行緒平行查詢 10 檔股票，極大化速度
             with ThreadPoolExecutor(max_workers=10) as executor:
                 futures = {executor.submit(market_scraper.fetch_stock_stats, comp): comp for comp in companies}
                 for future in as_completed(futures):
@@ -244,20 +231,16 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
                     except Exception:
                         results.append({"成分股名稱": comp, "Ticker": "解析失敗", "最新價格": None, "近一年最高": None, "高點0.618": None, "距高點回撤(%)": None})
             
-            # 整理為 DataFrame 並確保順序與原表一致
             df_stats = pd.DataFrame(results)
             df_stats = df_stats.set_index('成分股名稱').reindex(companies).reset_index()
             
-            # 調整欄位順序
             cols = ['成分股名稱', 'Ticker', '最新價格', '近一年最高', '高點0.618', '距高點回撤(%)']
             df_stats = df_stats[cols]
             
-            # === 新增：防呆機制，將數值欄位強制轉為浮點數，無法轉換的變成 NaN ===
             numeric_cols = ['最新價格', '近一年最高', '高點0.618', '距高點回撤(%)']
             for c in numeric_cols:
                 df_stats[c] = pd.to_numeric(df_stats[c], errors='coerce')
             
-            # 顯示顏色漸層標註的資料表 (加入 na_rep="-" 遇到空值顯示 -)
             st.dataframe(
                 df_stats.style.format({
                     "最新價格": "{:,.2f}",
@@ -267,6 +250,53 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
                 }, na_rep="-").background_gradient(subset=["距高點回撤(%)"], cmap="RdYlGn", vmin=-50, vmax=0),
                 hide_index=True
             )
+
+# ==========================================
+# 新增：第五分頁 (均線策略與全歷史資料)
+# ==========================================
+def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
+    st.subheader("📈 均線避險策略分析 (20MA)")
+    st.info("💡 策略邏輯：當淨值站在 20MA 之上時持有；跌破 20MA 則空手換回現金。此策略旨在規避市場大幅修正。")
+
+    current_target = st.selectbox("請選擇分析標的:", list(options_map.keys()), key="ma_select")
+    target_key = options_map[current_target]
+    df_nav = nav_data.get(target_key)
+
+    if df_nav is not None and not df_nav.empty:
+        # 1. 執行策略回測
+        res = BacktestEngine.calculate_ma_strategy(df_nav)
+        df_strategy = res['df']
+        stats = res['stats']
+
+        # 2. 顯示成效指標
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("策略總報酬", f"{stats['均線策略總報酬 (%)']:.1f}%", 
+                      delta=f"{stats['均線策略總報酬 (%)'] - stats['買入持有總報酬 (%)']:.1f}% (vs B&H)")
+        with col2:
+            st.metric("買入持有報酬", f"{stats['買入持有總報酬 (%)']:.1f}%")
+        with col3:
+            st.metric("策略最大回撤 (MDD)", f"{stats['均線策略 MDD (%)']:.1f}%")
+        with col4:
+            st.metric("買入持有 MDD", f"{stats['買入持有 MDD (%)']:.1f}%")
+
+        # 3. 顯示圖表
+        ChartManager.plot_nav_with_ma(df_strategy, current_target)
+        ChartManager.plot_strategy_comparison(df_strategy)
+
+        # 4. 成立以來淨值資料保存與檢視
+        with st.expander("📂 檢視成立以來完整淨值紀錄"):
+            st.write(f"共計 {len(df_nav)} 筆交易日資料")
+            csv = df_nav.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 下載完整歷史資料 (CSV)",
+                data=csv,
+                file_name=f"{target_key}_history.csv",
+                mime='text/csv',
+            )
+            st.dataframe(df_nav.sort_values('日期', ascending=False), use_container_width=True)
+    else:
+        st.error("此標的無效，無法進行均線分析。")
 
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
@@ -278,21 +308,17 @@ def main():
         st.session_state['has_run'] = True
         
     if st.session_state.get('has_run'):
-        
-        # 接收三種資料 (淨值、配息、成分股)
         nav_data, div_data, hold_data = load_data_with_cache(target_markets, fund_ids)
         if not nav_data:
             st.error("❌ 未取得任何資料，請檢查網路或代號。")
             return
         
-        # 覆寫名稱
         for item in Config.FUND_WATCH_LIST:
             fid = item['id']
             custom_name = item['name']
             if fid in nav_data:
                 nav_data[fid]['基金名稱'] = custom_name
 
-        # 建立選項 Map (市場 -> 基金)
         options_map = {}
         processed_keys = set()
         for market_name in Config.MARKET_TICKERS.keys():
@@ -315,8 +341,8 @@ def main():
         market_sort_list = [{'id': name, 'name': name} for name in Config.MARKET_TICKERS.keys()]
         full_sort_list = market_sort_list + Config.FUND_WATCH_LIST
 
-        # === 四個分頁 ===
-        tab1, tab2, tab3, tab4 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測", "🔍 10大成分股"])
+        # === 五個分頁 ===
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測", "🔍 10大成分股", "🛡️ 均線策略分析"])
         
         with tab1:
             render_tab_overview(nav_data, div_data, full_sort_list)
@@ -326,6 +352,8 @@ def main():
             render_tab_backtest(nav_data, options_map)
         with tab4:
             render_tab_holdings(hold_data, options_map)
+        with tab5:
+            render_tab_ma_strategy(nav_data, options_map)
 
 if __name__ == "__main__":
     main()
