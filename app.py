@@ -252,7 +252,7 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
             )
 
 # ==========================================
-# 新增：第五分頁 (均線策略與全歷史資料)
+# ⚡ 更新：第五分頁 (均線策略進階版 - 動態切換時段)
 # ==========================================
 def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
     st.subheader("📈 均線避險策略分析 (20MA)")
@@ -263,33 +263,105 @@ def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
     df_nav = nav_data.get(target_key)
 
     if df_nav is not None and not df_nav.empty:
-        # 1. 執行策略回測
+        # ====================================================
+        # 1. 核心邏輯：在全域歷史計算 MA，避免切換時段導致 MA 斷層
+        # ====================================================
         res = BacktestEngine.calculate_ma_strategy(df_nav)
-        df_strategy = res['df']
-        stats = res['stats']
+        df_full_strategy = res['df']
+        
+        if df_full_strategy.empty:
+            st.warning("歷史數據不足 20 天，無法計算 20MA。")
+            return
 
-        # 2. 顯示成效指標
+        # ====================================================
+        # 2. 動態時間區間選擇器
+        # ====================================================
+        time_options = ["近1月", "近3月", "近半年", "近1年", "近3年", "近5年", "近10年", "成立以來", "自訂區間"]
+        
+        st.write("#### ⏳ 選擇分析區間")
+        selected_time = st.radio("區間選項:", options=time_options, index=7, horizontal=True, label_visibility="collapsed")
+
+        # 獲取基金全歷史的最早與最晚日期
+        min_date = df_full_strategy['日期'].min().date()
+        max_date = df_full_strategy['日期'].max().date()
+        start_date, end_date = min_date, max_date
+
+        if selected_time == "自訂區間":
+            col_d1, col_d2, _ = st.columns([1, 1, 2])
+            with col_d1:
+                start_date = st.date_input("開始日期", min_value=min_date, max_value=max_date, value=min_date)
+            with col_d2:
+                end_date = st.date_input("結束日期", min_value=min_date, max_value=max_date, value=max_date)
+        elif selected_time != "成立以來":
+            delta_map = {
+                "近1月": relativedelta(months=1),
+                "近3月": relativedelta(months=3),
+                "近半年": relativedelta(months=6),
+                "近1年": relativedelta(years=1),
+                "近3年": relativedelta(years=3),
+                "近5年": relativedelta(years=5),
+                "近10年": relativedelta(years=10),
+            }
+            # 如果扣除後早於成立日期，就用成立日期
+            calc_start = max_date - delta_map[selected_time]
+            start_date = max(min_date, calc_start)
+
+        # 確保型態統一為 pd.Timestamp
+        start_ts = pd.to_datetime(start_date)
+        end_ts = pd.to_datetime(end_date)
+
+        # ====================================================
+        # 3. 截取資料並動態重算該區間的績效 (Rebasing)
+        # ====================================================
+        mask = (df_full_strategy['日期'] >= start_ts) & (df_full_strategy['日期'] <= end_ts)
+        df_period = df_full_strategy.loc[mask].copy()
+
+        if df_period.empty or len(df_period) < 2:
+            st.warning("選擇的區間內無足夠資料進行計算 (至少需要兩天)。")
+            return
+
+        # 動態重算：以區間第一天為基期 (1.0) 累積相乘
+        df_period['Cum_Buy_Hold'] = (1 + df_period['Daily_Return']).cumprod()
+        df_period['Cum_Strategy'] = (1 + df_period['Strategy_Return']).cumprod()
+
+        final_bh = (df_period['Cum_Buy_Hold'].iloc[-1] - 1) * 100
+        final_str = (df_period['Cum_Strategy'].iloc[-1] - 1) * 100
+
+        def get_mdd(cum_returns):
+            peak = cum_returns.expanding(min_periods=1).max()
+            dd = (cum_returns - peak) / peak
+            return dd.min() * 100
+
+        mdd_bh = get_mdd(df_period['Cum_Buy_Hold'])
+        mdd_str = get_mdd(df_period['Cum_Strategy'])
+
+        # ====================================================
+        # 4. 顯示成效指標與圖表
+        # ====================================================
+        st.markdown("---")
+        st.markdown("#### 📊 區間策略成效對比")
+        st.caption(f"分析期間：**{start_ts.strftime('%Y-%m-%d')}** 至 **{end_ts.strftime('%Y-%m-%d')}**")
+        
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("策略總報酬", f"{stats['均線策略總報酬 (%)']:.1f}%", 
-                      delta=f"{stats['均線策略總報酬 (%)'] - stats['買入持有總報酬 (%)']:.1f}% (vs B&H)")
+            st.metric("策略期間報酬", f"{final_str:.2f}%", 
+                      delta=f"{final_str - final_bh:.2f}% (vs B&H)")
         with col2:
-            st.metric("買入持有報酬", f"{stats['買入持有總報酬 (%)']:.1f}%")
+            st.metric("買入持有報酬", f"{final_bh:.2f}%")
         with col3:
-            st.metric("策略最大回撤 (MDD)", f"{stats['均線策略 MDD (%)']:.1f}%")
+            st.metric("策略最大回撤 (MDD)", f"{mdd_str:.2f}%")
         with col4:
-            st.metric("買入持有 MDD", f"{stats['買入持有 MDD (%)']:.1f}%")
+            st.metric("買入持有 MDD", f"{mdd_bh:.2f}%")
 
-        # 3. 顯示圖表
-        ChartManager.plot_nav_with_ma(df_strategy, current_target)
-        ChartManager.plot_strategy_comparison(df_strategy)
+        ChartManager.plot_nav_with_ma(df_period, current_target)
+        ChartManager.plot_strategy_comparison(df_period)
 
-        # 4. 成立以來淨值資料保存與檢視
-        with st.expander("📂 檢視成立以來完整淨值紀錄"):
+        # 5. 完整淨值資料保存與檢視
+        with st.expander("📂 檢視完整歷史淨值紀錄與下載"):
             st.write(f"共計 {len(df_nav)} 筆交易日資料")
             csv = df_nav.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="📥 下載完整歷史資料 (CSV)",
+                label="📥 下載歷史淨值 (CSV)",
                 data=csv,
                 file_name=f"{target_key}_history.csv",
                 mime='text/csv',
