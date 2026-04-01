@@ -146,12 +146,13 @@ class ExcelReport:
             for j in range(len(df.columns)):
                 val = df.iat[i, j]
                 worksheet.write(i+1, j, str(val), text_fmt)
-
+                
     @staticmethod
     def _set_columns_width(df, worksheet):
         for i, col in enumerate(df.columns):
+            # 修正：加入 str(x) 確保相容於 PyArrow 後端環境
             max_len = max(
-                df[col].astype(str).map(lambda x: len(x.encode('utf-8'))).max(),
+                df[col].astype(str).map(lambda x: len(str(x).encode('utf-8'))).max(),
                 len(str(col).encode('utf-8'))
             )
             width = min(max(max_len * 0.9, 10), 50)
