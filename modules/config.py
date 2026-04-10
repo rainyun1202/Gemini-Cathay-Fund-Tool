@@ -73,6 +73,8 @@ class Config:
         "Vanguard 全世界股票 (VT)": "VT",
         "Vanguard S&P 500 (VOO)": "VOO",
         "Invesco QQQ (QQQ)": "QQQ",
+        "兩倍做多 QQQ (QLD)": "QLD",
+        "三倍做多半導體 (SOXL)": "SOXL",
         "Vanguard Total Intl Stock (VXUS)": "VXUS",
         "Vanguard Total World Bond (BNDW)": "BNDW",
         "VanEck Uranium+Nuclear (NLR)": "NLR",
