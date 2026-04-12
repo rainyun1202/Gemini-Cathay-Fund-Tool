@@ -18,66 +18,44 @@ class ExcelReport:
             # ==========================================
             # Sheet 1: 總覽 Summary (自定義欄位排序)
             # ==========================================
-            
-            # 定義您想要的欄位順序
-            # 邏輯：基本資料 -> 近一年高低 -> 【配息資訊】 -> 歷史高低
             desired_order = [
                 '基金名稱',
                 '最新價格', '最新價格日期',
                 '近一年最高價格', '最高價與最新價%', '近一年最高價格日期',
                 '近一年最低價格', '最低價與最新價%', '近一年最低價格日期',
-                # --- 將配息欄位移到這裡 ---
                 '近一年配息率總和(%)', '最近一次配息日', '最近一次配息金額', '最近一次當期配息率(%)',
-                # --- 歷史欄位放到最後 ---
                 '歷史最高價格', '歷史最高價格日期',
                 '歷史最低價格', '歷史最低價格日期'
             ]
             
-            # 1. 確保 DataFrame 包含這些欄位 (避免有些欄位沒產生導致報錯)
-            # 先取出目前 df 有的所有欄位，交集比對
             existing_cols = list(summary_df.columns)
             final_cols = []
-            
-            # 加入指定的排序欄位
             for col in desired_order:
                 if col in existing_cols:
                     final_cols.append(col)
-            
-            # 加入剩下沒在指定清單中的欄位 (以防萬一有漏掉的)
             for col in existing_cols:
-                if col not in final_cols and col != '基金連結': # 連結不直接顯示
+                if col not in final_cols and col != '基金連結':
                     final_cols.append(col)
 
-            # 2. 重新排序 DataFrame
             display_df = summary_df[final_cols]
-            
-            # 3. 寫入 Excel
             display_df.to_excel(writer, index=False, header=False, sheet_name='總覽 Summary', startrow=1)
             ws_summary = writer.sheets['總覽 Summary']
             ExcelReport._apply_styles(workbook, ws_summary, display_df, summary_df)
             ExcelReport._set_columns_width(display_df, ws_summary)
 
             # ==========================================
-            # Sheet 2: 配息明細 Details (只留最近一年)
+            # Sheet 2: 配息明細 Details
             # ==========================================
             if not all_div_df.empty:
-                # 1. 複製一份避免影響原資料
                 div_output = all_div_df.copy()
-                
-                # 2. 日期過濾邏輯：只保留「配息基準日」在最近一年內的資料
-                # 為了過濾，先暫時轉成 datetime
                 div_output['temp_date'] = pd.to_datetime(div_output['配息基準日'], errors='coerce')
                 cutoff_date = pd.Timestamp.now() - pd.DateOffset(years=1)
-                
-                # 執行篩選
                 div_output = div_output[div_output['temp_date'] >= cutoff_date]
                 
-                # 3. 欄位整理
                 target_cols = ['基金名稱', '配息基準日', '除息日', '每單位配息金額', '當期配息率(%)', '原始配息率字串']
                 valid_cols = [c for c in target_cols if c in div_output.columns]
                 div_output = div_output[valid_cols]
                 
-                # 4. 寫入 Excel
                 if not div_output.empty:
                     div_output.to_excel(writer, index=False, header=False, sheet_name='配息明細 Details', startrow=1)
                     ws_div = writer.sheets['配息明細 Details']
@@ -89,7 +67,6 @@ class ExcelReport:
 
     @staticmethod
     def _apply_styles(workbook, worksheet, display_df, original_df):
-        """主表樣式 (含超連結)"""
         base_font = 'Microsoft JhengHei'
         header_fmt = workbook.add_format({'bold': True, 'font_name': base_font, 'bg_color': '#DCE6F1', 'align': 'center', 'valign': 'vcenter', 'border': 1})
         text_fmt = workbook.add_format({'font_name': base_font, 'valign': 'top', 'border': 1})
@@ -97,7 +74,6 @@ class ExcelReport:
         link_fmt = workbook.add_format({'font_color': 'blue', 'underline': 1, 'font_name': base_font, 'valign': 'top', 'border': 1})
         date_fmt = workbook.add_format({'num_format': 'yyyy-mm-dd', 'font_name': base_font, 'valign': 'top', 'border': 1})
 
-        # 寫入 Header
         for col, val in enumerate(display_df.columns):
             worksheet.write(0, col, val, header_fmt)
 
@@ -105,13 +81,7 @@ class ExcelReport:
         
         for i in range(len(display_df)):
             name = display_df.iat[i, 0]
-            # 注意：因為 display_df 已經重新排序，我們需要用「基金名稱」回去 original_df 找連結
-            # 這裡做一個簡單的 map 查找，確保連結正確
             fund_name = display_df.iat[i, 0]
-            
-            # 在原始資料中找到對應的 URL (假設基金名稱是唯一的，如果不唯一可能會有風險，但在這個應用場景通常沒問題)
-            # 安全起見，我們還是用 original_df 的 index i，前提是 display_df 只是換欄位順序，沒有換列順序
-            # 只要上面的 display_df = summary_df[final_cols] 沒有 sort_values，index 對應就是正確的
             if '基金連結' in original_df.columns:
                 url = original_df.iloc[i]['基金連結']
                 worksheet.write_url(i+1, 0, url, link_fmt, string=str(name))
@@ -120,7 +90,6 @@ class ExcelReport:
 
             for j in range(1, len(display_df.columns)):
                 val = display_df.iat[i, j]
-                
                 if j in date_cols and pd.notna(val):
                     if isinstance(val, (str, datetime, pd.Timestamp)): val = pd.to_datetime(val)
                     worksheet.write_datetime(i+1, j, val, date_fmt)
@@ -134,14 +103,11 @@ class ExcelReport:
 
     @staticmethod
     def _apply_styles_simple(workbook, worksheet, df):
-        """明細表樣式 (不含超連結)"""
         base_font = 'Microsoft JhengHei'
         header_fmt = workbook.add_format({'bold': True, 'font_name': base_font, 'bg_color': '#EBF1DE', 'align': 'center', 'border': 1})
         text_fmt = workbook.add_format({'font_name': base_font, 'border': 1})
-        
         for col, val in enumerate(df.columns):
             worksheet.write(0, col, val, header_fmt)
-            
         for i in range(len(df)):
             for j in range(len(df.columns)):
                 val = df.iat[i, j]
@@ -150,7 +116,6 @@ class ExcelReport:
     @staticmethod
     def _set_columns_width(df, worksheet):
         for i, col in enumerate(df.columns):
-            # 修正：加入 str(x) 確保相容於 PyArrow 後端環境
             max_len = max(
                 df[col].astype(str).map(lambda x: len(str(x).encode('utf-8'))).max(),
                 len(str(col).encode('utf-8'))
@@ -160,19 +125,28 @@ class ExcelReport:
             
     @staticmethod
     def create_single_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> bytes:
-        """【新增】生成單一 DataFrame 的 Excel 報表 (適用於成分股下載)"""
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
             workbook = writer.book
             df.to_excel(writer, index=False, header=False, sheet_name=sheet_name, startrow=1)
             worksheet = writer.sheets[sheet_name]
-            # 沿用明細表的簡易綠色標題樣式
             ExcelReport._apply_styles_simple(workbook, worksheet, df)
             ExcelReport._set_columns_width(df, worksheet)
         return output.getvalue()
 
-class ChartManager:
+    @staticmethod
+    def create_perf_excel_bytes(perf_df: pd.DataFrame, fund_name: str) -> bytes:
+        """生成績效分析專用的 Excel"""
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            perf_df.to_excel(writer, index=False, sheet_name='績效分析', startrow=1)
+            workbook = writer.book
+            worksheet = writer.sheets['績效分析']
+            ExcelReport._apply_styles_simple(workbook, worksheet, perf_df)
+            ExcelReport._set_columns_width(perf_df, worksheet)
+        return output.getvalue()
 
+class ChartManager:
     @staticmethod
     def plot_dual_axis_trends(all_data: Dict[str, pd.DataFrame], selected_keys: List[str], time_range_key: str):
         if not selected_keys:
@@ -255,50 +229,26 @@ class ChartManager:
         st.plotly_chart(fig, use_container_width=True)
 
     @staticmethod
-    def plot_nav_with_ma(strategy_df: pd.DataFrame, fund_name: str):
-        """繪製淨值與 20MA 的對照圖"""
-        fig = go.Figure()
-
-        # 淨值線
-        fig.add_trace(go.Scatter(
-            x=strategy_df['日期'], y=strategy_df['NAV'],
-            name='歷史淨值', line=dict(color='#1f77b4', width=2)
-        ))
-
-        # 20MA 線
-        fig.add_trace(go.Scatter(
-            x=strategy_df['日期'], y=strategy_df['MA'],
-            name='20日均線 (月線)', line=dict(color='#ff7f0e', width=1.5, dash='dot')
-        ))
-
-        fig.update_layout(
-            title=f"{fund_name} - 淨值與 20MA 走勢圖 (全歷史)",
-            xaxis_title="日期",
-            yaxis_title="淨值",
-            hovermode="x unified",
-            legend=dict(orientation="h", y=1.1)
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-    @staticmethod
-    def plot_strategy_comparison(strategy_df: pd.DataFrame):
-        """繪製策略累積報酬率對照圖"""
+    def plot_investment_performance(perf_df: pd.DataFrame, fund_name: str):
+        """繪製本金市值與總價值(含息)的趨勢圖"""
         fig = go.Figure()
 
         fig.add_trace(go.Scatter(
-            x=strategy_df['日期'], y=strategy_df['Cum_Buy_Hold'],
-            name='買入持有 (Buy & Hold)', line=dict(color='gray', width=1.5)
+            x=perf_df['月份'], y=perf_df['本金市值'],
+            name='本金市值', line=dict(color='#1f77b4', width=2),
+            hovertemplate='本金市值: %{y:,.0f}'
         ))
 
         fig.add_trace(go.Scatter(
-            x=strategy_df['日期'], y=strategy_df['Cum_Strategy'],
-            name='20MA 避險策略', line=dict(color='#2ca02c', width=2.5)
+            x=perf_df['月份'], y=perf_df['資產總價值'],
+            name='資產總價值 (含息)', line=dict(color='#2ca02c', width=3),
+            hovertemplate='總價值: %{y:,.0f}'
         ))
 
         fig.update_layout(
-            title="累積報酬率對照圖 (起始資產為 1.0)",
-            xaxis_title="日期",
-            yaxis_title="資產價值",
+            title=f"{fund_name} - 投資績效趨勢分析",
+            xaxis_title="時間",
+            yaxis_title="金額",
             hovermode="x unified",
             legend=dict(orientation="h", y=1.1)
         )

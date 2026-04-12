@@ -27,10 +27,6 @@ st.set_page_config(page_title="全球市場與基金分析", layout="wide")
 
 @st.cache_data(ttl=3600, show_spinner="正在自網路下載最新數據...")
 def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) -> Tuple[Dict, Dict, Dict]:
-    """
-    快取資料載入函式
-    Return: (nav_data_map, dividend_data_map, holdings_data_map)
-    """
     nav_data = {}
     div_data = {}
     hold_data = {}
@@ -42,16 +38,10 @@ def load_data_with_cache(target_markets: Dict[str, str], fund_ids: List[str]) ->
         
     if fund_ids:
         fund_scraper = FundScraper()
-        
-        # A. 抓淨值
         fund_navs = fund_scraper.fetch_all_nav(fund_ids)
         nav_data.update(fund_navs)
-        
-        # B. 抓配息
         fund_divs = fund_scraper.fetch_all_dividend(fund_ids)
         div_data.update(fund_divs)
-        
-        # C. 抓取成分股
         fund_holds = fund_scraper.fetch_all_holdings(fund_ids)
         hold_data.update(fund_holds)
         
@@ -252,130 +242,69 @@ def render_tab_holdings(hold_data: Dict, options_map: Dict[str, str]):
             )
 
 # ==========================================
-# ⚡ 更新：第五分頁 (均線策略進階版 - 動態切換時段)
+# 新增：第五分頁 (投入績效分析)
 # ==========================================
-def render_tab_ma_strategy(nav_data: Dict, options_map: Dict[str, str]):
-    st.subheader("📈 均線避險策略分析 (20MA)")
-    st.info("💡 策略邏輯：當淨值站在 20MA 之上時持有；跌破 20MA 則空手換回現金。此策略旨在規避市場大幅修正。")
+def render_tab_performance(nav_data: Dict, div_data: Dict, options_map: Dict[str, str]):
+    st.subheader("💰 投入資金實際績效分析")
+    st.info("💡 輸入您的初始本金與開始投資日期，系統將結合「歷史價格」與「實際配息紀錄」計算每月績效與領息狀況。")
 
-    current_target = st.selectbox("請選擇分析標的:", list(options_map.keys()), key="ma_select")
-    target_key = options_map[current_target]
-    df_nav = nav_data.get(target_key)
+    # === 參數設定區 ===
+    col_sel, col_val, col_date = st.columns([2, 1, 1])
+    
+    with col_sel:
+        current_target = st.selectbox("🎯 選擇分析標的:", list(options_map.keys()), key="perf_select")
+        target_key = options_map[current_target]
+        df_nav = nav_data.get(target_key)
+        df_div = div_data.get(target_key)
 
-    if df_nav is not None and not df_nav.empty:
-        # ====================================================
-        # 1. 核心邏輯：在全域歷史計算 MA，避免切換時段導致 MA 斷層
-        # ====================================================
-        res = BacktestEngine.calculate_ma_strategy(df_nav)
-        df_full_strategy = res['df']
-        
-        if df_full_strategy.empty:
-            st.warning("歷史數據不足 20 天，無法計算 20MA。")
+    with col_val:
+        principal = st.number_input("💵 投入本金 (金額)", min_value=1000, value=100000, step=10000)
+
+    with col_date:
+        if df_nav is not None and not df_nav.empty:
+            min_date = pd.to_datetime(df_nav['日期'].min())
+            max_date = pd.to_datetime(df_nav['日期'].max())
+            # 預設為一年前
+            default_start = max_date - relativedelta(years=1)
+            if default_start < min_date:
+                default_start = min_date
+            start_date = st.date_input("📅 開始投資日期", min_value=min_date, max_value=max_date, value=default_start)
+        else:
+            st.error("無效資料")
             return
 
-        # ====================================================
-        # 2. 動態時間區間選擇器
-        # ====================================================
-        time_options = ["近1月", "近3月", "近半年", "近1年", "近3年", "近5年", "近10年", "成立以來", "自訂區間"]
+    if df_nav is not None:
+        # 1. 執行運算
+        perf_df, err = BacktestEngine.calculate_investment_performance(df_nav, df_div, principal, start_date)
         
-        st.write("#### ⏳ 選擇分析區間")
-        selected_time = st.radio("區間選項:", options=time_options, index=7, horizontal=True, label_visibility="collapsed")
-
-        # 獲取基金全歷史的最早與最晚日期
-        min_date = df_full_strategy['日期'].min().date()
-        max_date = df_full_strategy['日期'].max().date()
-        start_date, end_date = min_date, max_date
-
-        if selected_time == "自訂區間":
-            col_d1, col_d2, _ = st.columns([1, 1, 2])
-            with col_d1:
-                start_date = st.date_input("開始日期", min_value=min_date, max_value=max_date, value=min_date)
-            with col_d2:
-                end_date = st.date_input("結束日期", min_value=min_date, max_value=max_date, value=max_date)
-        elif selected_time != "成立以來":
-            delta_map = {
-                "近1月": relativedelta(months=1),
-                "近3月": relativedelta(months=3),
-                "近半年": relativedelta(months=6),
-                "近1年": relativedelta(years=1),
-                "近3年": relativedelta(years=3),
-                "近5年": relativedelta(years=5),
-                "近10年": relativedelta(years=10),
-            }
-            # 如果扣除後早於成立日期，就用成立日期
-            calc_start = max_date - delta_map[selected_time]
-            start_date = max(min_date, calc_start)
-
-        # 確保型態統一為 pd.Timestamp
-        start_ts = pd.to_datetime(start_date)
-        end_ts = pd.to_datetime(end_date)
-
-        # ====================================================
-        # 3. 截取資料並動態重算該區間的績效 (Rebasing)
-        # ====================================================
-        mask = (df_full_strategy['日期'] >= start_ts) & (df_full_strategy['日期'] <= end_ts)
-        df_period = df_full_strategy.loc[mask].copy()
-
-        if df_period.empty or len(df_period) < 2:
-            st.warning("選擇的區間內無足夠資料進行計算 (至少需要兩天)。")
+        if err:
+            st.error(err)
             return
 
-        # 動態重算：以區間第一天為基期 (1.0) 累積相乘
-        df_period['Cum_Buy_Hold'] = (1 + df_period['Daily_Return']).cumprod()
-        df_period['Cum_Strategy'] = (1 + df_period['Strategy_Return']).cumprod()
-
-        final_bh = (df_period['Cum_Buy_Hold'].iloc[-1] - 1) * 100
-        final_str = (df_period['Cum_Strategy'].iloc[-1] - 1) * 100
-
-        def get_mdd(cum_returns):
-            peak = cum_returns.expanding(min_periods=1).max()
-            dd = (cum_returns - peak) / peak
-            return dd.min() * 100
-
-        mdd_bh = get_mdd(df_period['Cum_Buy_Hold'])
-        mdd_str = get_mdd(df_period['Cum_Strategy'])
-
-        # === 新增：計算該區間內的實際交易次數 ===
-        # Target_Position 發生變化 (0變1 或 1變0) 即代表一次交易動作
-        trade_count_period = (df_period['Target_Position'].diff().fillna(0) != 0).sum()
-
-        # ====================================================
-        # 4. 顯示成效指標與圖表
-        # ====================================================
+        # 2. 顯示核心指標面板
         st.markdown("---")
-        st.markdown("#### 📊 區間策略成效對比")
-        st.caption(f"分析期間：**{start_ts.strftime('%Y-%m-%d')}** 至 **{end_ts.strftime('%Y-%m-%d')}**")
-        
-        # 改為 5 個 Column 來容納交易次數
-        col1, col2, col3, col4, col5 = st.columns(5)
-        with col1:
-            st.metric("策略期間報酬", f"{final_str:.2f}%", 
-                      delta=f"{final_str - final_bh:.2f}% (vs B&H)")
-        with col2:
-            st.metric("買入持有報酬", f"{final_bh:.2f}%")
-        with col3:
-            st.metric("策略最大回撤 (MDD)", f"{mdd_str:.2f}%")
-        with col4:
-            st.metric("買入持有 MDD", f"{mdd_bh:.2f}%")
-        with col5:
-            st.metric("區間進出次數", f"{trade_count_period} 次", help="買進或賣出皆算一次動作")
+        latest = perf_df.iloc[-1]
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("最終資產總價值", f"{latest['資產總價值']:,.0f}", delta=f"總獲利 {latest['資產總價值'] - principal:,.0f}")
+        c2.metric("累計領息金額", f"{latest['累計領息']:,.0f}")
+        c3.metric("總報酬率", f"{latest['累計報酬率(%)']:.2f}%")
+        c4.metric("本金市值", f"{latest['本金市值']:,.0f}")
 
-        ChartManager.plot_nav_with_ma(df_period, current_target)
-        ChartManager.plot_strategy_comparison(df_period)
+        # 3. 顯示圖表
+        ChartManager.plot_investment_performance(perf_df, current_target)
 
-        # 5. 完整淨值資料保存與檢視
-        with st.expander("📂 檢視完整歷史淨值紀錄與下載"):
-            st.write(f"共計 {len(df_nav)} 筆交易日資料")
-            csv = df_nav.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 下載歷史淨值 (CSV)",
-                data=csv,
-                file_name=f"{target_key}_history.csv",
-                mime='text/csv',
-            )
-            st.dataframe(df_nav.sort_values('日期', ascending=False), use_container_width=True)
-    else:
-        st.error("此標的無效，無法進行均線分析。")
+        # 4. 下載 Excel
+        excel_data = ExcelReport.create_perf_excel_bytes(perf_df, current_target)
+        st.download_button(
+            label="📥 下載按月績效明細 (Excel)",
+            data=excel_data,
+            file_name=f"{current_target}_績效分析_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+        # 5. 數據表格
+        st.write("#### 📊 按月績效統計表")
+        st.dataframe(perf_df.sort_values('月份', ascending=False), use_container_width=True, hide_index=True)
 
 def main():
     st.title("📊 全球市場與基金淨值戰情室")
@@ -420,8 +349,8 @@ def main():
         market_sort_list = [{'id': name, 'name': name} for name in Config.MARKET_TICKERS.keys()]
         full_sort_list = market_sort_list + Config.FUND_WATCH_LIST
 
-        # === 五個分頁 ===
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 投資策略回測", "🔍 10大成分股", "🛡️ 均線策略分析"])
+        # === 更新五個分頁標籤 ===
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 報表總覽", "📈 資產趨勢比較", "💰 策略報酬回測", "🔍 10大成分股", "💰 投入績效分析"])
         
         with tab1:
             render_tab_overview(nav_data, div_data, full_sort_list)
@@ -432,7 +361,7 @@ def main():
         with tab4:
             render_tab_holdings(hold_data, options_map)
         with tab5:
-            render_tab_ma_strategy(nav_data, options_map)
+            render_tab_performance(nav_data, div_data, options_map)
 
 if __name__ == "__main__":
     main()

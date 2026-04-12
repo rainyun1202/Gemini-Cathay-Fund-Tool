@@ -51,28 +51,20 @@ class FundAnalyzer:
         }
 
         if df_div is not None and not df_div.empty:
-            # 確保按日期降序 (最新的在上面)
-            # 因為原始資料可能是字串日期，先轉 datetime 排序較保險
             df_div['sort_date'] = pd.to_datetime(df_div['配息基準日'])
             df_div = df_div.sort_values('sort_date', ascending=False)
             
-            # 取得最近一筆
             latest_div = df_div.iloc[0]
             div_stats["最近一次配息日"] = latest_div["配息基準日"]
             div_stats["最近一次配息金額"] = latest_div["每單位配息金額"]
             div_stats["最近一次當期配息率(%)"] = latest_div["當期配息率(%)"]
 
-            # 計算近一年總和 (取最近 12 筆資料)
-            # 若基金為月配，12筆約等於一年；若為季配，則會加總到過去3年，
-            # 但這裡需求是"最近12次"或"一年"，為了避免季配被高估，我們嚴格過濾日期
-            
             cutoff_date = datetime.now() - relativedelta(years=1)
             df_last_year = df_div[df_div['sort_date'] >= cutoff_date]
             
             if not df_last_year.empty:
                  div_stats["近一年配息率總和(%)"] = df_last_year["當期配息率(%)"].sum()
             else:
-                # 如果一年內沒配息 (例如剛成立，或年配還沒到)，則顯示 0
                 div_stats["近一年配息率總和(%)"] = 0.0
 
         # --- 3. 合併結果 ---
@@ -92,32 +84,22 @@ class FundAnalyzer:
             "歷史最低價格日期": df_nav.loc[hist_min_idx, '日期'],
             "基金連結": url
         }
-        result.update(div_stats) # 加入配息數據
+        result.update(div_stats)
         return result
 
     @staticmethod
-    def analyze_all(
-        nav_map: Dict[str, pd.DataFrame], 
-        div_map: Dict[str, pd.DataFrame], 
-        sort_list: List[Dict] = None
-    ) -> pd.DataFrame:
-        """
-        分析所有資料 (整合淨值與配息)
-        """
+    def analyze_all(nav_map: Dict[str, pd.DataFrame], div_map: Dict[str, pd.DataFrame], sort_list: List[Dict] = None) -> pd.DataFrame:
         summary_list = []
         processed_keys = set()
         
-        # 1. 優先處理 sort_list
         if sort_list:
             for item in sort_list:
                 fid = item['id']
                 if fid in nav_map:
-                    # 取出對應的配息表 (如果有的話)
                     df_div = div_map.get(fid)
                     summary_list.append(FundAnalyzer.analyze_single(nav_map[fid], df_div))
                     processed_keys.add(fid)
         
-        # 2. 處理剩餘項目
         for key, df_nav in nav_map.items():
             if key not in processed_keys:
                 df_div = div_map.get(key)
@@ -125,7 +107,6 @@ class FundAnalyzer:
                 
         return pd.DataFrame(summary_list)
 
-    # ... (calculate_performance_metrics 等其他方法保持不變，可省略或照舊) ...
     @staticmethod
     def calculate_performance_metrics(df: pd.DataFrame, risk_free_rate: float) -> Dict[str, float]:
         df = df.sort_values('日期')
@@ -141,7 +122,6 @@ class FundAnalyzer:
         return {"volatility": volatility * 100, "sharpe": sharpe_ratio, "annual_return": annual_return * 100}
 
 class BacktestEngine:
-    # ... (保持原有的回測引擎程式碼不變) ...
     @staticmethod
     def calculate_lump_sum(df: pd.DataFrame, invest_date: datetime, amount: float):
         df = df.sort_values('日期').reset_index(drop=True)
@@ -212,65 +192,52 @@ class BacktestEngine:
         return pd.DataFrame(results)
 
     @staticmethod
-    def calculate_ma_strategy(df: pd.DataFrame, ma_window: int = 20, confirm_days: int = 3, cooldown_days: int = 20):
-        """
-        實務型均線策略回測 (加入確認機制與冷卻期)：
-        - 策略：連續 `confirm_days` 天淨值大於 MA 且不在冷卻期內，則進場 (Buy)。
-                連續 `confirm_days` 天淨值小於 MA 且不在冷卻期內，則出場 (Sell)。
-        - 冷卻期：每次進出場後，限制 `cooldown_days` 天內不得再次交易，避免盤整期頻繁雙巴。
-        """
-        df = df.sort_values('日期').copy()
-        df['日期'] = pd.to_datetime(df['日期'])
+    def calculate_investment_performance(df_nav: pd.DataFrame, df_div: pd.DataFrame, principal: float, start_date: datetime):
+        """計算實際投入資金的績效狀況 (按月顯示)"""
+        df_nav = df_nav.copy()
+        df_nav['日期'] = pd.to_datetime(df_nav['日期'])
+        df_nav = df_nav.sort_values('日期')
         
-        # 1. 計算移動平均線
-        df['MA'] = df['NAV'].rolling(window=ma_window).mean()
+        df_nav = df_nav[df_nav['日期'] >= pd.to_datetime(start_date)]
+        if df_nav.empty:
+            return None, "選擇的開始日期晚於現有的資料日期。"
+
+        buy_price = df_nav['NAV'].iloc[0]
+        units = principal / buy_price
         
-        # 判斷每日是否在 MA 之上
-        df['Above_MA'] = (df['NAV'] > df['MA']).astype(int)
+        df_div_calc = pd.DataFrame()
+        if df_div is not None and not df_div.empty:
+            df_div_calc = df_div.copy()
+            df_div_calc['除息日'] = pd.to_datetime(df_div_calc['除息日'])
+            df_div_calc = df_div_calc[df_div_calc['除息日'] >= df_nav['日期'].iloc[0]]
+
+        monthly_nav = df_nav.set_index('日期')['NAV'].resample('ME').last().to_frame()
         
-        # 計算連續天數 (使用 rolling sum)
-        # 如果最近 3 天的 Above_MA 加總等於 3，代表連續 3 天大於 MA
-        # 如果加總等於 0，代表連續 3 天小於 MA
-        df['Above_Sum'] = df['Above_MA'].rolling(window=confirm_days).sum()
+        results = []
+        cum_div_cash = 0.0
         
-        # 2. 狀態機：產生交易訊號與部位
-        positions = []
-        current_position = 0 # 0=空手, 1=持有
-        cooldown = 0
-        
-        for i in range(len(df)):
-            # 如果均線或確認天數還算不出來，保持空手
-            if pd.isna(df['MA'].iloc[i]) or pd.isna(df['Above_Sum'].iloc[i]):
-                positions.append(0)
-                continue
-                
-            if cooldown > 0:
-                cooldown -= 1 # 冷卻期倒數
-            else:
-                # 檢查訊號 (不在冷卻期內才會執行)
-                if df['Above_Sum'].iloc[i] == confirm_days and current_position == 0:
-                    current_position = 1  # 買進 (進場)
-                    cooldown = cooldown_days
-                elif df['Above_Sum'].iloc[i] == 0 and current_position == 1:
-                    current_position = 0  # 賣出 (出場)
-                    cooldown = cooldown_days
-                    
-            positions.append(current_position)
+        for date, row in monthly_nav.iterrows():
+            current_nav = row['NAV']
+            if pd.isna(current_nav): continue
             
-        # 紀錄「今天收盤後的決策部位」
-        df['Target_Position'] = positions
-        
-        # 實務操作：今天的決策，明天才能享受到報酬 (Shift 1)
-        df['Position'] = df['Target_Position'].shift(1).fillna(0)
-        
-        # 3. 計算報酬率
-        df['Daily_Return'] = df['NAV'].pct_change()
-        df['Strategy_Return'] = df['Daily_Return'] * df['Position']
-        
-        # 4. 全域累積報酬率
-        df['Cum_Buy_Hold'] = (1 + df['Daily_Return']).cumprod()
-        df['Cum_Strategy'] = (1 + df['Strategy_Return']).cumprod()
-        
-        return {
-            "df": df.dropna(subset=['MA']) # 回傳包含完整計算的表格
-        }
+            month_div = 0.0
+            if not df_div_calc.empty:
+                mask = (df_div_calc['除息日'].dt.year == date.year) & (df_div_calc['除息日'].dt.month == date.month)
+                month_div = (df_div_calc[mask]['每單位配息金額'] * units).sum()
+            
+            cum_div_cash += month_div
+            market_value = units * current_nav
+            total_value = market_value + cum_div_cash
+            total_roi = ((total_value - principal) / principal) * 100
+            
+            results.append({
+                "月份": date.strftime('%Y-%m'),
+                "當月底價格": current_nav,
+                "本金市值": round(market_value, 0),
+                "當月領息": round(month_div, 0),
+                "累計領息": round(cum_div_cash, 0),
+                "資產總價值": round(total_value, 0),
+                "累計報酬率(%)": round(total_roi, 2)
+            })
+            
+        return pd.DataFrame(results), None
